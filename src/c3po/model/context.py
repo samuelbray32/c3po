@@ -6,7 +6,7 @@ import flax.linen as nn
 from flax.linen import scan
 from functools import partial
 
-from .model import MLP
+from .util import MLP
 
 
 def context_factory(context_model: str, context_dim: int, **kwargs):

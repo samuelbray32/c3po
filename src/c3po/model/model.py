@@ -17,21 +17,6 @@ from .encoder import encoder_factory
 from .context import context_factory
 from .rate_prediction import rate_prediction_factory
 
-
-class MLP(nn.Module):
-    """Simple MLP with leaky relu activations. Used in custom models."""
-
-    features: Sequence[int]
-    kernel_init: nn.initializers.Initializer = nn.initializers.lecun_normal()
-
-    @nn.compact
-    def __call__(self, x):
-        for feat in self.features[:-1]:
-            x = nn.leaky_relu(nn.Dense(feat, kernel_init=self.kernel_init)(x))
-        x = nn.Dense(self.features[-1], kernel_init=self.kernel_init)(x)
-        return x
-
-
 class Embedding(nn.Module):
     encoder_args: dict
     context_args: dict

@@ -6,12 +6,12 @@ import flax.linen as nn
 from flax.linen import scan
 from functools import partial
 
-from .model import MLP
+from .util import MLP
 
 
 def encoder_factory(encoder_model: str, latent_dim: int, **kwargs) -> BaseEncoder:
     if encoder_model == "simple":
-        return SimpleEncoder(widths=widths, latent_dim=latent_dim, **kwargs)
+        return SimpleEncoder(latent_dim=latent_dim, **kwargs)
     else:
         raise ValueError(f"Unknown encoder model: {encoder_model}")
 
