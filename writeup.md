@@ -30,4 +30,18 @@ With increasing use of high-density electrode probes for electrophysiology, the 
 
   The embedded waveform feature $Z$ then contains information about an individual clusterless mark. However individual neuron spiking is a noisy, stochastic* process. Moreover, we are often interested in identifying neural states that vary on much slower timescales than an indivdual firing event and are defined by collective activity of multiple neurons (e.g. hippocampal representation of position, value coding in a multi-choice task). We therefore want to identify a context feature $C_i$ which encodes information about collective neural activity over time.
 
-  We can functionally define $C_i = \rho(\Delta t_i, Z_i, C_{i-1})$. Where $\rho$ is a recurrent neural network that takes $(\Delta t_i, Z_i)$ as input at each timepoint and carries the history term $C_i$. We include $\Delta t_i$ in the input to the neural network as both which neuron that fires (encoded in $Z_i$) and it's firing rate (~ encoded by $\Delta t_i$) are determined by the latent context of the network.  Again, the loss term we describe below is not dependent on the exact form of this transformation, allowing us to use variations of recurrent neural networks such as LSTM in our implementation.
+  We can functionally define $C_i = \rho(\Delta t_i, Z_i, C_{i-1})$. Where $\rho$ is a recurrent neural network that takes $(\Delta t_i, Z_i)$ as input at each timepoint and carries the history term $C_i$. We include $\Delta t_i$ in the input to the neural network as both the firing neuron's identity (encoded in $Z_i$) and it's firing rate (~ encoded by $\Delta t_i$) are determined by the latent context of the network.  Again, the loss term we describe below is not dependent on the exact form of this transformation, allowing us to use variations of recurrent neural networks such as LSTM in our implementation.
+
+### Rate Prediction
+
+  Similar to [Contrastive Predictive Coding (CPC)](https://arxiv.org/abs/1807.03748), our definition of a "good" context embedding is based on its ability to predictively identify future state of the system. Explictly we need to define a function $r(\theta(Z_i,C_{i-1}))\sim P(Z_i|C_{i-1})$ which is proportional to the likelihood of an embedded observation $Z_i$ in a given context $C$.
+
+  Again, the final loss term is independent of the functional form of the parameterization  $\theta(Z_i,C_{i-1})$.  Matching the approach of the original CPC paper, our default implementation is a bilinear model for each needed parameter $\theta_i = Z_i B C_{i-1}$ where $B$ is a learnable parameter matrix, though other implementations are provided.
+
+### Loss
+
+  To summarize the previous architechture, we have embedded our sequence of waveform observations $X = \{(\Delta t_i,W_i)\}|_{i=1}^{n_{obs}}$ independently into a sequence of events $Z$ in a lower-dimensional space. This sequence is then iterated over by a RNN to generate a series of context states $C$.
+
+#### - Defining the probability model
+
+  We can now define the likelihood of our observations.  Qualitatively, we can define the probability of each observation as a spike with the given waveform $W_i$ with a wait time of $\Delta t_i$, with no other spike events during that wait time. This can be written as $P(X_i) = P(W_i,\omega=\Delta t_i) * \Pi _{j\neq i}P(W_j, \omega > \Delta t_i)$ where $\omega$ is the wait time for an event.
