@@ -17,6 +17,7 @@ from .encoder import encoder_factory
 from .context import context_factory
 from .rate_prediction import rate_prediction_factory
 
+
 class Embedding(nn.Module):
     encoder_args: dict
     context_args: dict
@@ -34,7 +35,7 @@ class Embedding(nn.Module):
         self.context_scan = nn.RNN(self.context, time_major=False)
 
     def __call__(self, x, delta_t):
-        z = jax.vmap(self.encoder, in_axes=(-2), out_axes=-2)(x)
+        z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
         z_aug = jnp.concatenate([z, jnp.log(delta_t[..., None])], axis=-1)
 
         c = self.context_scan(z_aug)
@@ -127,7 +128,7 @@ def loss_sample(pos_rates, cum_neg_rates, delta_t):
 @jax.jit
 def loss(pos_rates, cum_neg_rates, delta_t):
     """C3PO loss function for length one sequence and poisson process."""
-    neg_log_p = -jnp.log(pos_rates) + delta_t[:, 1:] * (
+    neg_log_p = -jnp.log(pos_rates) + 1 / 3 * delta_t[:, 1:] * (
         cum_neg_rates + pos_rates
     )  # (n_marks)
     return jnp.mean(neg_log_p)
