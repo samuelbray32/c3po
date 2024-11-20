@@ -16,12 +16,16 @@ def rate_prediction_factory(
         return BilinearRatePrediction(
             context_dim=context_dim, latent_dim=latent_dim, **kwargs
         )
-    if rate_model == "denseBilinear":
+    elif rate_model == "denseBilinear":
         return DenseBilinearRatePrediction(
             context_dim=context_dim, latent_dim=latent_dim, **kwargs
         )
-    if rate_model == "dense":
+    elif rate_model == "dense":
         return DenseRatePrediction(**kwargs)
+    elif rate_model == "bilinearLinear":
+        return BilinearLinearRatePrediction(
+            context_dim=context_dim, latent_dim=latent_dim, **kwargs
+        )
 
     else:
         raise ValueError(f"Unknown rate model: {rate_model}")
@@ -60,6 +64,25 @@ class DenseBilinearRatePrediction(nn.Module):
         b = self.param("b", nn.initializers.zeros, (1,))
         # Perform the operation z^T W c
         func = lambda zi, ci: jnp.squeeze(jnp.dot(zi, jnp.dot(W, ci)) + b)
+        return jnp.squeeze(jnp.clip(jnp.exp(jax.vmap(func)(z, c)), min=1e-8, max=1e3))
+
+class BilinearLinearRatePrediction(nn.Module):
+    context_dim: int
+    latent_dim: int
+
+    @nn.compact
+    def __call__(self, z, c):
+        # Initialize a trainable matrix W with shape (latent_dim, context_dim)
+        W = self.param(
+            "W", nn.initializers.lecun_normal(), (self.latent_dim, self.context_dim)
+        )
+        b = self.param("b", nn.initializers.zeros, (1,))
+        W_c = self.param(
+            "W_c", nn.initializers.lecun_normal(), (self.context_dim, 1)
+        )
+
+        # Perform the operation z^T W c
+        func = lambda zi, ci: jnp.squeeze(jnp.dot(zi, jnp.dot(W, ci)) + b + jnp.dot(ci, W_c))
         return jnp.squeeze(jnp.clip(jnp.exp(jax.vmap(func)(z, c)), min=1e-8, max=1e3))
 
 
