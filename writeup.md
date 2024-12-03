@@ -42,6 +42,28 @@ With increasing use of high-density electrode probes for electrophysiology, the 
 
   To summarize the previous architechture, we have embedded our sequence of waveform observations $X = \{(\Delta t_i,W_i)\}|_{i=1}^{n_{obs}}$ independently into a sequence of events $Z$ in a lower-dimensional space. This sequence is then iterated over by a RNN to generate a series of context states $C$.
 
-#### - Defining the probability model
+#### Defining the probability model
 
   We can now define the likelihood of our observations.  Qualitatively, we can define the probability of each observation as a spike with the given waveform $W_i$ with a wait time of $\Delta t_i$, with no other spike events during that wait time. This can be written as $P(X_i) = P(W_i,\omega=\Delta t_i) * \Pi _{j\neq i}P(W_j, \omega > \Delta t_i)$ where $\omega$ is the wait time for an event.
+
+# Notes on training hyperparameters
+
+- `n_neg_samples`:
+  - _Low values_: less specific prediction required. Need to know when rates are high, but less sensitive to false positives.
+  - _High values_: requires more precision when predicting when a unit fires. Loss term is much more punished for predicting high rates at innappropriate times
+- `batch size`:
+  - Changes what you're loss is contrasting against:
+  - _High values_: Requires that spikes from a trial are different from different states and differnet trials. Less pressure for contrast within-trial
+  - _Low Values_: More of the contrastive loss comes from within-trial spikes.  Model has to learn more about difference over time in a trial
+
+- Recommended training Protocol
+  -
+
+  - annealing of `n_neg_samples`:
+    - Start with low value (e.g. 8) to allow model to learn general rates and embeddings. Allow to train until improvement <1%
+    - Double `n_neg_samples` and train until stable
+    - Repeat up to max value (128)
+  - Preliminary: `batch_size`
+    - Run protocol above once with `batch_size`=64 to learn general structure
+    - Repeat protocol with `batch_size`=8 for refiniment of within trial changes
+    - TODO: verify whether the initial stage is necessary.
