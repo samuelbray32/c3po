@@ -1,10 +1,7 @@
 from typing import Sequence
-import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.linen import scan
-from functools import partial
 
 from .util import MLP
 
@@ -120,9 +117,6 @@ class MultiShankEncoderV0(BaseEncoder):
         # encoded_shanks = jnp.sum(encoded_shanks, axis=-1)
         print("encoded shanks shape", encoded_shanks.shape)
         return encoded_shanks
-
-
-from jax import jit
 
 
 class MultiShankEncoderV1(BaseEncoder):
