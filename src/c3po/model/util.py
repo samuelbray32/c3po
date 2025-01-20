@@ -67,11 +67,18 @@ class StabilizedDenseDynamics(nn.Module):
         )
         self.bias = self.param("bias", self.bias_init, (self.features,))
 
-    def __call__(self, x):
-        stabilized_kernel = stabilize_matrix(self.kernel, self.delta_matrix)
+    def stable_matrix(self):
+        return stabilize_matrix(self.kernel, self.delta_matrix)
+
+    def __call__(self, x, stabilized_kernel=None):
+        # stabilized_kernel = None
+        if stabilized_kernel is None:
+            stabilized_kernel = stabilize_matrix(self.kernel, self.delta_matrix)
         if self.delta_matrix:
-            return x - jnp.dot(x, stabilized_kernel) + self.bias
-        return jnp.dot(x, stabilized_kernel) + self.bias
+            new_x = x - jnp.dot(x, stabilized_kernel)  # + self.bias
+        else:
+            new_x = jnp.dot(x, stabilized_kernel)  # + self.bias
+        return new_x  # , stabilized_kernel
 
 
 def stabilize_matrix(matrix, delta_matrix=False):
