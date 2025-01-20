@@ -29,16 +29,72 @@ class Embedding(nn.Module):
         self.context = context_factory(
             **self.context_args, context_dim=self.context_dim
         )
+        self.init_carry = self.param(
+            "carry", nn.initializers.lecun_normal(), (self.context_dim, 1)
+        )
+
+        self.context_scan = nn.RNN(self.context, time_major=False)
+
+    def __call__(self, x, delta_t):
+        z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
+        z_aug = z
+        # z_aug = jnp.concatenate([z, jnp.log(delta_t[..., None])], axis=-1)
+
+        print("init carry", self.init_carry.shape)
+        c_0 = jnp.ones((x.shape[0], self.context_dim)) * self.init_carry[None, :, 0]
+        c_0 = (c_0, jnp.zeros((x.shape[0], 1)))
+        # c_0 = c_0 + jax.random.normal(0, (x.shape[0], self.context_dim)) * 0.1
+        c_0 = None
+        c = self.context_scan(z_aug, initial_carry=c_0)
+        return (
+            z,
+            c,
+        )  # z = (n_batch, n_marks, latent_dim), c = (n_batch, n_marks, context_dim)
+
+
+class LFADSEmbedding(nn.Module):
+    encoder_args: dict
+    context_args: dict
+    latent_dim: int
+    context_dim: int
+
+    def setup(self):
+        self.encoder = encoder_factory(**self.encoder_args, latent_dim=self.latent_dim)
+        self.context_forward = context_factory(
+            **self.context_args["forward"], context_dim=self.context_dim
+        )
+        self.context_reverse = context_factory(
+            **self.context_args["reverse"], context_dim=self.context_dim
+        )
+        self.lfads = context_factory(
+            **self.context_args["lfads"], context_dim=self.context_dim
+        )
+
         self.init_carry = self.variable(
             "state", "carry", lambda: jnp.zeros((self.context_dim,))
         )
-        self.context_scan = nn.RNN(self.context, time_major=False)
+        self.context_scan_forward = nn.RNN(self.context_forward, time_major=False)
+        self.context_scan_reverse = nn.RNN(
+            self.context_reverse, time_major=False, keep_order=True, reverse=True
+        )
+
+        self.lfads_scan = nn.RNN(self.lfads, time_major=False, return_carry=True)
 
     def __call__(self, x, delta_t):
         z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
         z_aug = jnp.concatenate([z, jnp.log(delta_t[..., None])], axis=-1)
 
-        c = self.context_scan(z_aug)
+        c_forward = self.context_scan_forward(z_aug)
+        c_reverse = self.context_scan_reverse(
+            z_aug,
+        )
+        lfads_init = jnp.tanh(c_forward[:, -1, :] + c_reverse[:, -1, :])
+        print("lfads_init", lfads_init.shape)
+        print("delta_t", delta_t.shape)
+        _, c = self.lfads_scan(delta_t[:, :, None], initial_carry=lfads_init)
+        print("c", c.shape)
+        print("z", z.shape)
+        print("_", _.shape)
         return (
             z,
             c,
@@ -52,14 +108,24 @@ class C3PO(nn.Module):
     latent_dim: int
     context_dim: int
     n_neg_samples: int
+    lfads: bool = False
+    initial_carry_args: dict = None
 
     def setup(self):
-        self.embedding = Embedding(
-            encoder_args=self.encoder_args,
-            context_args=self.context_args,
-            latent_dim=self.latent_dim,
-            context_dim=self.context_dim,
-        )
+        if self.lfads:
+            self.embedding = LFADSEmbedding(
+                encoder_args=self.encoder_args,
+                context_args=self.context_args,
+                latent_dim=self.latent_dim,
+                context_dim=self.context_dim,
+            )
+        else:
+            self.embedding = Embedding(
+                encoder_args=self.encoder_args,
+                context_args=self.context_args,
+                latent_dim=self.latent_dim,
+                context_dim=self.context_dim,
+            )
         self.rate_prediction = rate_prediction_factory(
             **self.rate_args, latent_dim=self.latent_dim, context_dim=self.context_dim
         )
