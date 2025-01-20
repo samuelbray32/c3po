@@ -16,12 +16,14 @@ def context_factory(context_model: str, context_dim: int, **kwargs):
         return StableSimpleRNNContext(context_dim=context_dim, **kwargs)
     elif context_model == "fastSlowRNN":
         return FastSlowRNNContext(context_dim=context_dim, **kwargs)
-    elif context_model == "fastSlowRNN_v2":
-        return FastSlowRNNContext_v2(context_dim=context_dim, **kwargs)
+    elif context_model == "heirarchicalRNN":
+        return HeirarchicalRNN(context_dim=context_dim, **kwargs)
     elif context_model == "lfads":
         return LFADSContext(context_dim=context_dim, **kwargs)
     elif context_model == "LSTM":
         return nn.LSTMCell(name="context", features=context_dim, **kwargs)
+    elif context_model == "projectedLSTM":
+        return ProjectedLSTM(context_dim=context_dim, **kwargs)
     elif context_model == "GRU":
         return nn.GRUCell(name="context", features=context_dim, **kwargs)
     else:
@@ -132,6 +134,7 @@ class FastSlowRNNContext(BaseContext):
     slow_update_freq: int = 100  # Frequency for updating slow state
     n_slow: int = 2  # Number of slow states
     stabilize_dynamics: bool = True
+    carry_stabilized: bool = False
 
     def setup(self):
         if self.latents is None:
@@ -189,7 +192,10 @@ class FastSlowRNNContext(BaseContext):
         )
 
     def __call__(self, carry, z):
-        c_combined, step = carry
+        if self.carry_stabilized:
+            c_combined, step, stable_matrices = carry
+        else:
+            c_combined, step = carry
         n_fast = self.latents - self.n_slow
         print(step.shape, step.dtype)
 
@@ -201,7 +207,12 @@ class FastSlowRNNContext(BaseContext):
 
         # Fast state update
         if self.stabilize_dynamics:
-            c_fast_trans = self.history_matrix_fast(c_fast)
+            if self.carry_stabilized:
+                c_fast_trans, stable_fast = self.history_matrix_fast(
+                    c_fast, stable_matrices[0]
+                )
+            else:
+                c_fast_trans = self.history_matrix_fast(c_fast)
         else:
             c_fast_trans = c_fast - self.history_matrix_fast(c_fast)
         c_fast_new = z_trans + c_fast_trans
@@ -210,7 +221,12 @@ class FastSlowRNNContext(BaseContext):
         update_slow = nn.relu(step - self.slow_update_freq + 1)
         c_fast_slow = self.fast_to_slow(c_fast)
         if self.stabilize_dynamics:
-            c_slow_trans = self.history_matrix_slow(c_slow)
+            if self.carry_stabilized:
+                c_slow_trans, stable_slow = self.history_matrix_slow(
+                    c_slow, stable_matrices[1]
+                )
+            else:
+                c_slow_trans = self.history_matrix_slow(c_slow)
             c_slow_trans = c_slow_trans + c_fast_slow
             c_slow_new = c_slow * (1 - update_slow) + c_slow_trans * update_slow
         else:
@@ -222,17 +238,169 @@ class FastSlowRNNContext(BaseContext):
         # Combine fast and slow states
         c_combined = jnp.concatenate([c_fast_new, c_slow_new], axis=-1)
         c_combined = jnp.clip(c_combined, -1000, 1000)
+        # make the new carry
+        if self.carry_stabilized:
+            new_carry = (c_combined, step, (stable_fast, stable_slow))
+        else:
+            new_carry = (c_combined, step)
+
         if self.latents != self.context_dim:
             c_proj = self.context_projection(c_combined)
-            return (c_combined, step), c_proj
-        return (c_combined, step), c_combined
+            return new_carry, c_proj
+        return new_carry, c_combined
 
     def initialize_carry(self, init_key, input_shape):
         # Use the learnable initial carry parameter instead of reinitializing it
         # Return `initial_carry` as `c` and initialize step to 0
         # c = jnp.broadcast_to(self.initial_carry, (input_shape[0], self.context_dim))
-        c = jax.random.normal(init_key, (input_shape[0], self.latents)) * 0.3
-        # c = jnp.ones((input_shape[0], self.latents)) * self.initial_carry[None, :, 0]
+        # c = jax.random.normal(init_key, (input_shape[0], self.latents)) * 0.3
+        c = (
+            jnp.ones((input_shape[0], self.latents)) * self.initial_carry.T
+        )  # [None, :, 0]
         step = 0
-        print("CARRY", c.shape, step)
+        # print("CARRY", c.shape, step)
+        # if self.carry_stabilized:
+        #     stable_fast = self.history_matrix_fast.stable_matrix()
+        #     stable_slow = self.history_matrix_slow.stable_matrix()
+        #     return (c, step, (stable_fast, stable_slow))
         return (c, step)
+
+
+class ProjectedLSTM(BaseContext):
+    expanded_dim: Sequence[int]
+    update_freq: Sequence[int]
+
+    def setup(self):
+        self.lstm = [
+            nn.LSTMCell(name=f"lstm_layer_{i}", features=dim)
+            for i, dim in enumerate(self.expanded_dim)
+        ]
+        self.project = nn.Dense(
+            self.context_dim,
+            use_bias=False,
+            kernel_init=nn.initializers.xavier_uniform(),
+        )
+
+    def __call__(self, carry, z):
+        carry_list, step_list = carry
+        inputs_list = [z] + [c[1] for c in carry_list[:-1]]
+
+        new_carry_list = []
+        new_state_list = []
+        new_step_list = []
+
+        for carry_i, layer_input, lstm, freq, step in zip(
+            carry_list, inputs_list, self.lstm, self.update_freq, step_list
+        ):
+            update = nn.relu(step - freq + 1)
+            step = (step) * (1 - update) + 1
+            new_carry, new_state = lstm(carry_i, layer_input)
+            new_carry = new_carry[0]
+            # new_state = jnp.clip(new_state, -1000, 1000)
+
+            # only update the state and carry if the update flag is on
+            new_state = new_state * update + carry_i[1] * (1 - update)
+            new_carry = (new_carry * update + carry_i[0] * (1 - update), new_state)
+            # log it
+            new_step_list.append(step)
+            new_carry_list.append(new_carry)
+            new_state_list.append(new_state)
+
+        new_state = jnp.concatenate(new_state_list, axis=-1)
+
+        print("NEWSTATE", new_state.shape)
+        c = self.project(new_state)
+        return (new_carry_list, step_list), c
+
+    def initialize_carry(self, init_key, input_shape):
+        # return self.lstm.initialize_carry(init_key, input_shape)
+        return (
+            [lstm.initialize_carry(init_key, input_shape) for lstm in self.lstm],
+            [0 for _ in self.lstm],
+        )
+
+
+class HeirarchicalRNN(BaseContext):
+    scales: Sequence[float]
+    expanded_dim: Sequence[int]
+    update_freq: Sequence[int]
+
+    def setup(self):
+        # dynamics of each RNN layer
+        self.dynamics = [
+            StabilizedDenseDynamics(
+                dim,
+                delta_matrix=False,
+                kernel_init=partial(
+                    timescale_initializer,
+                    scales=list(np.abs(np.random.normal(s, 0.3, dim))),
+                ),
+            )
+            for dim, s in zip(self.expanded_dim, self.scales)
+        ]
+        # connection up the RNN layers
+        self.pass_through = [
+            nn.Dense(dim, use_bias=False) for dim in self.expanded_dim[1:]
+        ]
+        # from z to RNN_1
+        self.input_network = nn.Dense(self.expanded_dim[0])
+
+        # project the final state to the context
+        self.project = nn.Dense(self.context_dim, use_bias=False)
+
+        self.initial_carry = [
+            self.param(
+                f"initial_carr_{i}",  # Parameter name
+                lambda key: jax.random.normal(key, (1, dim)) * 3,
+            )
+            for i, dim in enumerate(self.expanded_dim)
+        ]
+
+    def __call__(self, carry, z):
+        state_list, step_list = carry
+        print("STATE", [s.shape for s in state_list])
+        print("STEP", step_list)
+
+        # update the first layer
+        new_step_list = [step_list[0]]
+        new_state_list = [
+            jnp.tanh(self.input_network(z)) + self.dynamics[0](state_list[0])
+        ]
+        # update the rest of the layers
+        for i in range(1, len(self.dynamics)):
+            new_state = self.dynamics[i](state_list[i]) + self.pass_through[i - 1](
+                state_list[i - 1]
+            )
+
+            update = nn.relu(step_list[i] - self.update_freq[i] + 1)
+            new_step_list.append((step_list[i]) * (1 - update) + 1)
+            new_state = new_state * update + state_list[i] * (1 - update)
+            new_state_list.append(new_state)
+
+        combined_state = jnp.concatenate(new_state_list, axis=-1)
+        combined_state = jnp.clip(combined_state, -1000, 1000)
+        c = self.project(combined_state)
+        return (new_state_list, new_step_list), c
+
+    def initialize_carry(self, init_key, input_shape):
+        state = [
+            # jnp.broadcast_to(
+            #     self.initial_carry[i], (input_shape[0], self.expanded_dim[i])
+            # )
+            jnp.ones((input_shape[0], self.expanded_dim[i])) * self.initial_carry[i][0]
+            for i in range(len(self.expanded_dim))
+        ]
+        print("STATE", [s.shape for s in state])
+        alt = [
+            jax.random.normal(init_key, (input_shape[0], dim)) * 0.3
+            for dim in self.expanded_dim
+        ]
+        print("ALT", [s.shape for s in alt])
+        return (state, [0 for _ in self.dynamics])
+        # return (
+        #     [
+        #         jax.random.normal(init_key, (input_shape[0], dim)) * 0.3
+        #         for dim in self.expanded_dim
+        #     ],
+        #     [0 for _ in self.dynamics],
+        # )
