@@ -14,7 +14,7 @@
 
 ### Observations
 
-The first step of the pipeline is to extract waveform mark events from electrophysiology data. This can be down with threshold detection to identify event times ($t$), followed by "waveform" featurization of each event ($W$).  For example, this could be the maximum voltage amplitude on each electrode channel within 50ms of the detected event.
+The first step of the pipeline is to extract waveform mark events from electrophysiology data. This can be down with threshold detection to identify event times ($t$), followed by "waveform" featurization of each event ($W$).  For example, this could be the maximum voltage amplitude on each electrode channel within 50 ns of the detected event.
 
 This gives us the set of observations $X = \{(t_i,W_i)\}|_{i=1}^{n_{obs}}$. Since these are ordered observations, this can also be described as $X = \{(\Delta t_i,W_i)\}|_{i=1}^{n_{obs}}$ where $\Delta t_i = t_i - t_{i-1}$, or the wait time between subsequent events.
 
