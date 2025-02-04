@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling", "hatch-vcs"]
+build-backend = "hatchling.build"
+
+[project]
+dependencies = ["numpy", "jax", "jaxlib", "flax", "matplotlib"]
+name = "c3po"
+description = "Unsupervised model to infer latent generative processes from point processes occuring in R^d spcae. Developed with focus for inferring neural states from waveform features of unclustered spike events."
+readme = "README.md"
+requires-python = ">=3.8"
+license = { file = "LICENSE" }
+authors = [{ name = "Sam Bray", email = "sam.bray@ucsf.edu" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+]
+dynamic = ["version"]
+
+[project.urls]
+"Homepage" = "https://github.com/samuelbray32/c3po"
+"Bug Tracker" = "https://github.com/samuelbray32/c3po/issues"
+
+[project.optional-dependencies]
+test = ["black", "pytest", "pytest-cov"]
+gpu = ["jax[cuda]"]
+
+[tool.hatch.version]
+source = "vcs"
+
+[tool.hatch.build.hooks.vcs]
+version-file = "src/c3po/_version.py"
+
+[tool.hatch.build.targets.sdist]
+exclude = [".git_archival.txt"]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/c3po"]
