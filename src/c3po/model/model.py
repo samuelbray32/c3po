@@ -8,6 +8,7 @@ import jax
 import jax.numpy as jnp
 import flax.linen as nn
 from functools import partial
+from typing import Sequence
 
 from .encoder import encoder_factory
 from .context import context_factory
@@ -20,22 +21,57 @@ class Embedding(nn.Module):
     context_args: dict
     latent_dim: int
     context_dim: int
+    convolutional: Sequence[dict] = None
 
-    def setup(self):
+    def setup(
+        self,
+    ):
         self.encoder = encoder_factory(**self.encoder_args, latent_dim=self.latent_dim)
         self.context = context_factory(
             **self.context_args, context_dim=self.context_dim
         )
-        self.init_carry = self.variable(
-            "state", "carry", lambda: jnp.zeros((self.context_dim,))
-        )
-        self.context_scan = nn.RNN(self.context, time_major=False)
+        # determine if context model is a RNN, execute scan if so
+        if isinstance(self.context, nn.RNNCellBase):
+            self.rnn_context = True
+            self.context_scan = nn.RNN(self.context, time_major=False)
+        else:
+            self.rnn_context = False
+
+        if self.convolutional is not None:
+            raise ValueError("Convolutional context not stably implemented.")
+            self.convolutional_layers = [
+                nn.Conv(**layer, padding="SAME") for layer in self.convolutional
+            ]
+        else:
+            self.convolutional_layers = []
 
     def __call__(self, x, delta_t):
+        # attach delta_t to z to be used in context model
         z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
         z_aug = jnp.concatenate([z, jnp.log(delta_t[..., None])], axis=-1)
+        # generate context
+        if self.rnn_context:
+            # context is a RNN
+            if self.context.infer_init:
+                # use the context model to initialize the carry if implemented
+                init_carry = self.context.initialize_carry_from_data(z_aug)
+            else:
+                init_carry = None
+            c = self.context_scan(z_aug, initial_carry=init_carry)
+        else:
+            # context is an alternative model (e.g. Wavenet)
+            # pass it the full sequence and let it handle the context
+            c = self.context(z_aug)
 
-        c = self.context_scan(z_aug)
+        if len(self.convolutional_layers) > 0:
+            # idea I was playing with prior to wavenet. will remove if wavenet continues to perform well
+            raise ValueError("Convolutional context not stably implemented.")
+            for layer in self.convolutional_layers[:-1]:
+                c = layer(c)
+                c = nn.leaky_relu(c)
+            c = self.convolutional_layers[-1](c)
+            print("convolutional", c.shape)
+
         return (
             z,
             c,
@@ -51,6 +87,7 @@ class C3PO(nn.Module):
     context_dim: int
     n_neg_samples: int
     predicted_sequence_length: int = 1
+    context_convolutional: Sequence[dict] = None
 
     def setup(self):
         self.embedding = Embedding(
@@ -58,6 +95,7 @@ class C3PO(nn.Module):
             context_args=self.context_args,
             latent_dim=self.latent_dim,
             context_dim=self.context_dim,
+            convolutional=self.context_convolutional,
         )
         self.distribution_class = distribution_dictionary[self.distribution]()
         self.rate_prediction = rate_prediction_factory(
@@ -114,8 +152,32 @@ class C3PO(nn.Module):
         return self.embedding(x, delta_t)
 
     # @jax.jit
-    def loss_generalized_model(self, pos_parameters, neg_parameters, delta_t):
-        """C3PO loss function for length one sequence and generic process."""
+    def loss_generalized_model(
+        self,
+        pos_parameters,
+        neg_parameters,
+        delta_t,
+        sample_step=1,  # None,
+        scale_neg_samples=30,
+    ):
+        """C3PO loss function for length n_predict and generic process.
+        Parameters:
+        pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
+        neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
+        delta_t: jnp.array of shape (batch_size, n_timepoints)
+        sample_step: int, optional
+            The step to sample the loss. The default is 1.
+            Useful to prevent issues with long predicted sequences.
+        scale_neg_samples: int, optional
+            The scaling factor for the negative samples. The default is 10.
+            This simulates increased number of negative samples without the memory cost.
+
+        Returns:
+            jnp.array: the loss value
+        """
+        if sample_step is None:
+            sample_step = self.predicted_sequence_length
+
         delta_t_stacked = jnp.concatenate(
             [
                 jnp.expand_dims(
@@ -139,24 +201,14 @@ class C3PO(nn.Module):
             cum_delta_t[:, -1][:, None, :], neg_parameters[:, :, 1:]
         )
         pos_survival_term = self._distribution_object().log_survival(
-            cum_delta_t, pos_parameters[:, :, 1:]
+            cum_delta_t[:, :-1], pos_parameters[:, 1:, 1:]
         )
 
-        # return hazard_term, pos_survival_term, neg_survival_term, cum_delta_t
-        # print(hazard_term.shape, neg_survival_term.shape, pos_survival_term.shape)
         neg_log_p = -(
-            jnp.sum(hazard_term, axis=1)
-            + jnp.sum(neg_survival_term, axis=1)
-            + jnp.sum(pos_survival_term, axis=1)
+            jnp.sum(hazard_term, axis=1)[..., ::sample_step]
+            + jnp.sum(neg_survival_term, axis=1)[..., ::sample_step]
+            + jnp.sum(pos_survival_term, axis=1)[..., ::sample_step] * scale_neg_samples
         )
-
-        # neg_log_p = -(
-        #     self._distribution_object().log_hazard(
-        #         delta_t[:, 1:],
-        #         pos_parameters,
-        #     )
-        #     + self._distribution_object().log_survival(delta_t[:, 1:], neg_parameters)
-        # )
         return jnp.mean(neg_log_p)
 
 
