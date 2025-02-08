@@ -1,0 +1,14 @@
+name: c3po
+channels:
+- conda-forge
+dependencies:
+- python
+- numpy
+- jax
+- flax
+- matplotlib
+- datajoint
+- ipython
+- black
+- pytest
+- pytest-cov

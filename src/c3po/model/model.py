@@ -177,7 +177,7 @@ class C3PO(nn.Module):
         """
         if sample_step is None:
             sample_step = self.predicted_sequence_length
-
+            
         delta_t_stacked = jnp.concatenate(
             [
                 jnp.expand_dims(
