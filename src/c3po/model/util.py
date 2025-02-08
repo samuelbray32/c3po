@@ -58,6 +58,7 @@ class StabilizedDenseDynamics(nn.Module):
     kernel_init: nn.initializers.Initializer = (
         None  # = nn.initializers.xavier_uniform()
     )
+
     bias_init: nn.initializers.Initializer = nn.initializers.zeros
     delta_matrix: bool = True
 
@@ -98,7 +99,7 @@ def stabilize_matrix(matrix, delta_matrix=False):
     # eigval_max = jnp.abs(jnp.max(eigvals))
     eigval_max = estimate_largest_eigenvalue(matrix, num_iterations=10)
     # scale the matrix to have the largest eigenvalue less than 1
-    stabilized_matrix = matrix / jnp.maximum(1.0, eigval_max)
+    stabilized_matrix = matrix / jnp.maximum(1.0, eigval_max + 1e-5)
     if delta_matrix:
         stabilized_matrix = stabilized_matrix - jnp.eye(matrix.shape[0])
     return stabilized_matrix
@@ -140,3 +141,113 @@ def estimate_largest_eigenvalue(matrix, num_iterations=100, tol=1e-6):
         v = v_new
 
     return largest_eigenvalue
+
+
+class CausalConv1D(nn.Module):
+    """1D Causal Convolutional Layer."""
+
+    features: int  # Number of output channels
+    kernel_size: int  # Size of the convolutional kernel
+    stride: int = 1  # Stride for the convolution
+    use_bias: bool = False  # Whether to include a bias term
+
+    def setup(self):
+        self.conv = nn.Conv(
+            features=self.features,
+            kernel_size=(self.kernel_size,),
+            strides=(self.stride,),
+            use_bias=self.use_bias,
+            padding="VALID",  # No automatic padding; we'll do it manually
+        )
+
+    def __call__(self, x):
+        """
+        Apply causal convolution.
+
+        Args:
+            x: Input tensor of shape (batch, time, channels)
+
+        Returns:
+            Output tensor of shape (batch, time, features)
+        """
+        # Compute the required padding (only left padding)
+        pad_width = self.kernel_size - 1  # Causal padding amount
+
+        # Pad input with zeros on the left
+        x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="constant")
+
+        # Apply convolution
+        return self.conv(x_padded)
+
+
+class DilatedCausalConv1D(CausalConv1D):
+    """Causal Convolution with Dilated Filters."""
+
+    dilation: int = 1  # Dilation factor
+
+    def setup(self):
+        self.conv = nn.Conv(
+            features=self.features,
+            kernel_size=(self.kernel_size,),
+            strides=(self.stride,),
+            use_bias=self.use_bias,
+            padding="VALID",  # No automatic padding; we'll do it manually
+            kernel_dilation=(self.dilation,),
+        )
+
+    def __call__(self, x):
+        pad_width = int((self.kernel_size - 1) * self.dilation)
+        x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="mean")
+        return self.conv(x_padded)
+
+
+# class Wavenet(nn.Module):
+#     """Wavenet Model.
+#     Citation: https://arxiv.org/pdf/1609.03499
+#     """
+#     layer_dilations: Sequence[int]
+#     layer_kernel_size: Sequence[int]
+#     layer_features: Sequence[int]
+#     num_channels: int # Number of output channels
+
+#     def setup(self):
+#         self.layers = [
+#             DilatedCausalConv1D(
+#                 features=self.layer_features[i],
+#                 kernel_size=self.layer_kernel_size[i],
+#                 dilation=self.layer_dilations[i],
+#             )
+#             for i in range(len(self.layer_dilations))
+#         ]
+#         self.gating_layers = [
+#             DilatedCausalConv1D(
+#                 features=self.layer_features[i],
+#                 kernel_size=self.layer_kernel_size[i],
+#                 dilation=self.layer_dilations[i],
+#             )
+#             for i in range(len(self.layer_dilations))
+#         ]
+#         self.final_conv = CausalConv1D(features=self.num_channels, kernel_size=1)
+
+#     def __call__(self, x):
+#         for layer in self.layers:
+#             x = jnp.tanh(layer(x)) * jax.nn.sigmoid(self.gating_layers(x)) # Gated activation units
+#         return self.final_conv(x)
+
+from functools import partial
+
+
+def causal_smoothing(x, filter_size=10):
+    pad_width = filter_size - 1  # Causal padding amount
+    # Pad input with zeros on the left
+    x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="constant")
+
+    # window = jnp.ones((filter_size, x.shape[-1])) / filter_size
+    # x = jax.lax.conv_general_dilated(x_padded, window, padding="VALID",window_strides=1)
+
+    window = jnp.ones((filter_size,)) / filter_size
+    conv = lambda y: jnp.convolve(y, window, mode="valid")
+    x = jax.vmap(jax.vmap(conv, in_axes=-1, out_axes=-1), in_axes=0, out_axes=0)(
+        x_padded
+    )
+    return x  # [:, pad_width:]
