@@ -3,13 +3,19 @@ import numpy as np
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from flax.linen import scan
 from functools import partial
 
-from .util import MLP, StabilizedDenseDynamics
+from .util import (
+    MLP,
+    StabilizedDenseDynamics,
+    DilatedCausalConv1D,
+    CausalConv1D,
+    causal_smoothing,
+)
 
 
 def context_factory(context_model: str, context_dim: int, **kwargs):
+    kwargs["infer_init"] = kwargs.get("infer_init", False)
     if context_model == "simpleRNN":
         return SimpleRNNContext(context_dim=context_dim, **kwargs)
     elif context_model == "stableSimpleRNN":
@@ -26,15 +32,24 @@ def context_factory(context_model: str, context_dim: int, **kwargs):
         return ProjectedLSTM(context_dim=context_dim, **kwargs)
     elif context_model == "GRU":
         return nn.GRUCell(name="context", features=context_dim, **kwargs)
+    elif context_model == "myGRU":
+        return MyGRU(context_dim=context_dim, **kwargs)
+    elif context_model == "nullRNN":
+        return NullRNN(context_dim=context_dim, **kwargs)
+    elif context_model == "wavenet":
+        kwargs.pop("infer_init", None)
+        return Wavenet(context_dim=context_dim, **kwargs)
     else:
         raise ValueError(f"Unknown context model: {context_model}")
 
 
 class BaseContext(nn.RNNCellBase):
     context_dim: int
+    infer_init: bool
 
     def setup(self):
-        pass
+        if self.infer_init:
+            self.infer_carry = DefaultInferCarry(self.context_dim)
 
     def __call__(self, c, z):
         raise NotImplementedError
@@ -42,9 +57,82 @@ class BaseContext(nn.RNNCellBase):
     def initialize_carry(self, init_key, input_shape):
         raise NotImplementedError
 
+    def initialize_carry_from_data(self, z):
+        # raise NotImplementedError
+        return self.infer_carry(z)
+
     @property
     def num_feature_axes(self):
         return 1
+
+
+class DefaultInferCarry(nn.Module):
+    context_dim: int
+
+    def setup(self):
+        self._forward = nn.GRUCell(features=30)
+        self._backward = nn.GRUCell(features=30)
+        self.forward = nn.RNN(self._forward, time_major=False)
+        self.backward = nn.RNN(self._backward, time_major=False, reverse=True)
+        self.dense = MLP([32, 32, self.context_dim])
+
+    def __call__(self, z):
+        z_forward = self.forward(z)[:, -1, :]
+        z_backward = self.backward(z)[:, -1, :]
+        features = jnp.concatenate([z_forward, z_backward], axis=-1)
+        return self.dense(features)
+
+
+class NullRNN(BaseContext):
+    def __call__(self, c, z):
+        return 0, z
+
+    def initialize_carry(self, init_key, input_shape):
+        return 0
+
+
+class MyGRU(BaseContext):
+    gru_dim: int
+
+    def setup(self):
+        self.gru = nn.GRUCell(name="gru_context", features=self.gru_dim)
+        self.w = self.param(
+            "w", nn.initializers.xavier_uniform(), (self.gru_dim, self.context_dim)
+        )
+
+    def __call__(self, carry, z):
+        new_carry, new_state = self.gru(carry, z)
+        return new_carry, jnp.dot(new_state, self.w)
+
+    def initialize_carry(self, init_key, input_shape):
+        return self.gru.initialize_carry(init_key, input_shape)
+
+
+class layeredGRU(BaseContext):
+    gru_dims: Sequence[int]
+
+    def setup(self):
+        self.gru = [
+            nn.GRUCell(name=f"gru_layer_{i}", features=dim)
+            for i, dim in enumerate(self.gru_dims)
+        ]
+        self.w = self.param(
+            "w", nn.initializers.xavier_uniform(), (self.gru_dims[-1], self.context_dim)
+        )
+
+    def __call__(self, carry, z):
+        state_list = [z]
+        carry_list = []
+        for i, gru in enumerate(self.gru):
+            new_state, new_carry = gru(carry[i], state_list[i])
+            state_list.append(new_state)
+            carry_list.append(new_carry)
+        return carry_list, jnp.dot(state_list[-1], self.w)
+
+    def initialize_carry(self, init_key, input_shape):
+        layer_inputs = [input_shape]
+        for gru in self.gru[:-1]:
+            layer_inputs.append((input_shape[0], gru.features))
 
 
 class SimpleRNNContext(BaseContext):
@@ -326,6 +414,8 @@ class HeirarchicalRNN(BaseContext):
     update_freq: Sequence[int]
 
     def setup(self):
+        super().setup()
+
         # dynamics of each RNN layer
         self.dynamics = [
             StabilizedDenseDynamics(
@@ -346,15 +436,20 @@ class HeirarchicalRNN(BaseContext):
         self.input_network = nn.Dense(self.expanded_dim[0])
 
         # project the final state to the context
-        self.project = nn.Dense(self.context_dim, use_bias=False)
+        self.project = nn.Dense(
+            self.context_dim, use_bias=False, kernel_init=nn.initializers.orthogonal()
+        )
 
-        self.initial_carry = [
-            self.param(
-                f"initial_carr_{i}",  # Parameter name
-                lambda key: jax.random.normal(key, (1, dim)) * 3,
-            )
-            for i, dim in enumerate(self.expanded_dim)
-        ]
+        if self.infer_init:
+            self.dense_init = [MLP([16, 16, d]) for d in self.expanded_dim]
+        else:
+            self.initial_carry = [
+                self.param(
+                    f"initial_carr_{i}",  # Parameter name
+                    lambda key: jax.random.normal(key, (1, dim)) * 3,
+                )
+                for i, dim in enumerate(self.expanded_dim)
+            ]
 
     def __call__(self, carry, z):
         state_list, step_list = carry
@@ -364,7 +459,9 @@ class HeirarchicalRNN(BaseContext):
         # update the first layer
         new_step_list = [step_list[0]]
         new_state_list = [
-            jnp.tanh(self.input_network(z)) + self.dynamics[0](state_list[0])
+            # jnp.tanh(self.input_network(z))
+            self.input_network(z)
+            + self.dynamics[0](state_list[0])
         ]
         # update the rest of the layers
         for i in range(1, len(self.dynamics)):
@@ -383,13 +480,20 @@ class HeirarchicalRNN(BaseContext):
         return (new_state_list, new_step_list), c
 
     def initialize_carry(self, init_key, input_shape):
+        # state = [
+        #     # jnp.broadcast_to(
+        #     #     self.initial_carry[i], (input_shape[0], self.expanded_dim[i])
+        #     # )
+        #     jnp.ones((input_shape[0], self.expanded_dim[i])) * self.initial_carry[i][0]
+        #     for i in range(len(self.expanded_dim))
+        # ]
         state = [
-            # jnp.broadcast_to(
-            #     self.initial_carry[i], (input_shape[0], self.expanded_dim[i])
-            # )
-            jnp.ones((input_shape[0], self.expanded_dim[i])) * self.initial_carry[i][0]
+            jnp.broadcast_to(
+                self.initial_carry[i], (input_shape[0], self.expanded_dim[i])
+            )
             for i in range(len(self.expanded_dim))
         ]
+
         print("STATE", [s.shape for s in state])
         alt = [
             jax.random.normal(init_key, (input_shape[0], dim)) * 0.3
@@ -404,3 +508,139 @@ class HeirarchicalRNN(BaseContext):
         #     ],
         #     [0 for _ in self.dynamics],
         # )
+
+    def initialize_carry_from_data(self, z):
+        inferred_val = super().initialize_carry_from_data(z)
+        state = [dense(inferred_val) for dense in self.dense_init]
+        return state, [0 for _ in self.dynamics]
+
+
+class Wavenet(nn.Module):
+    """Wavenet Model.
+    Citation: https://arxiv.org/pdf/1609.03499
+    """
+
+    layer_dilations: Sequence[int]
+    layer_kernel_size: Sequence[int]
+    context_dim: int  # Number of output channels
+    expanded_dim: int
+    smoothing: int = 1
+    categorical: bool = False
+
+    def setup(self):
+        self.tanh_layers = [
+            DilatedCausalConv1D(
+                features=self.expanded_dim,
+                kernel_size=self.layer_kernel_size[i],
+                dilation=self.layer_dilations[i],
+                use_bias=True,
+            )
+            for i in range(len(self.layer_dilations))
+        ]
+        self.gating_layers = [
+            DilatedCausalConv1D(
+                features=self.expanded_dim,
+                kernel_size=self.layer_kernel_size[i],
+                dilation=self.layer_dilations[i],
+                use_bias=True,
+            )
+            for i in range(len(self.layer_dilations))
+        ]
+        self.residual_layers = [
+            CausalConv1D(features=self.context_dim, kernel_size=1, use_bias=False)
+            for _ in range(len(self.layer_dilations))
+        ]
+        self.skip_connections = [
+            CausalConv1D(features=self.context_dim, kernel_size=1, use_bias=True)
+            for _ in range(len(self.layer_dilations))
+        ]
+
+        self.initial_layer = CausalConv1D(
+            self.context_dim, kernel_size=1, use_bias=False
+        )
+
+        self.post_sum = CausalConv1D(self.context_dim * 4, kernel_size=1, use_bias=True)
+        self.final_proj = CausalConv1D(self.context_dim, kernel_size=1, use_bias=False)
+
+    def __call__(self, x):
+        print("XX", x.shape)
+        if self.smoothing > 1:
+            x = causal_smoothing(x, self.smoothing)
+        print("XXX", x.shape)
+        x = self.initial_layer(x)  # expand from latent to context dimension
+        skip_connection = jnp.zeros(x.shape)
+        print(x.shape)
+        # delta_layers = []
+        # residual dilating layers
+        for tanh_layer, gating_layer, residual_layer, skip_layer in zip(
+            self.tanh_layers,
+            self.gating_layers,
+            self.residual_layers,
+            self.skip_connections,
+        ):
+            delta = jnp.tanh(tanh_layer(x)) * jax.nn.sigmoid(
+                gating_layer(x)
+            )  # Residual Gated activation units
+            skip_connection = skip_connection + skip_layer(delta)
+            delta = residual_layer(delta)
+            x = x + delta
+
+        # skip connection sum
+        # delta_layers = jnp.sum(jnp.array(delta_layers), axis=0)
+        # print(
+        #     "DEBUG",
+        #     delta_layers.shape,
+        #     jnp.array(
+        #         delta_layers,
+        #     ).shape,
+        #     delta_layers[0].shape,
+        # )
+        # delta_layers = jax.nn.relu(delta_layers)
+        # x = self.post_sum(delta_layers)
+        skip_connection = nn.relu(skip_connection)
+        x = self.post_sum(skip_connection)
+        x = jax.nn.relu(x)
+        x = self.final_proj(x)
+        if self.categorical:
+            x = jax.nn.softmax(x, axis=-1)
+        return x
+
+
+# class Wavenet(nn.Module): V0
+#     """Wavenet Model.
+#     Citation: https://arxiv.org/pdf/1609.03499
+#     """
+
+#     layer_dilations: Sequence[int]
+#     layer_kernel_size: Sequence[int]
+#     layer_features: Sequence[int]
+#     context_dim: int  # Number of output channels
+#     final_kernel_size: int = 10
+
+#     def setup(self):
+#         self.layers = [
+#             DilatedCausalConv1D(
+#                 features=self.layer_features[i],
+#                 kernel_size=self.layer_kernel_size[i],
+#                 dilation=self.layer_dilations[i],
+#             )
+#             for i in range(len(self.layer_dilations))
+#         ]
+#         self.gating_layers = [
+#             DilatedCausalConv1D(
+#                 features=self.layer_features[i],
+#                 kernel_size=self.layer_kernel_size[i],
+#                 dilation=self.layer_dilations[i],
+#             )
+#             for i in range(len(self.layer_dilations))
+#         ]
+#         self.final_conv = CausalConv1D(
+#             features=self.context_dim, kernel_size=self.final_kernel_size
+#         )
+
+#     def __call__(self, x):
+#         for layer, gating_layer in zip(self.layers, self.gating_layers):
+#             x = x + jnp.tanh(layer(x)) * jax.nn.sigmoid(
+#                 gating_layer(x)
+#             )  # Residual Gated activation units
+#         return self.final_conv(x)

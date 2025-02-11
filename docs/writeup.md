@@ -2,13 +2,13 @@
 
 ## Motivation
 
-- Studying the structure of population neural dynamics can help identify brain states and reveal how the brain encodes information about the world.
-- "Population neural activity" is a very-high dimensional vector, typically thought of as the firing rate of each neuron.
-  - Due to connectivity, learning, etc., the actual firing rate vectors don't fully span the high-dimensional space but occur on some lower-dimensional manifold.
-  - Interpreting this data involves embedding the manifold of observed population activity into a lower-dimensional space.
-- Most existing methods of embedding the dynamics (e.g., CEBRA, UMAP) take sorted spike firing rate vectors as input.
-  - This requires spike-sorting the electrical series data, which can be time-intensive and exclude low-amplitude events.
-- C3PO provides a 'clusterless' method to identify latent neural states from population activity.
+- Studying the structure of population neural dynamics can help identify brain states and reveal how the brain encodes information about the world
+- "Population neural activity" is a very-high dimensional vector, typically thought of as the firing rate of each neuron
+  - Due to connectivity/ learning/ etc. the actual firing rate vectors don't fully span the high dimensional space but occur on some lower-dimensional manifold
+  - Interpreting this data involves embedding the manifold of observed population activity into a lower-dimensional space
+- Most existing methods of embedding the dynamics (e.g. CEBRA, UMAP, LFADS) take sorted spike firing rate vectors as input
+  - This requires spike-sorting the electrical series data, which can be time-intensive and exclude low-amplitude events
+- C3PO provides a 'clusterless' method to identify latent neural states from population activity
 
 ## Model
 
@@ -42,15 +42,57 @@ Again, the final loss term is independent of the functional form of the paramete
 
 To summarize the previous architecture, we have embedded our sequence of waveform observations $X = \{(\Delta t_i,W_i)\}_{i=1}^{n_{obs}}$ independently into a sequence of events $Z$ in a lower-dimensional space. This sequence is then iterated over by an RNN to generate a series of context states $C$.
 
-#### Defining the probability model
+#### Defining the probability model: Single prediction
 
-We can now define the likelihood of our observations. Qualitatively, we can define the probability of each observation as a spike with the given waveform $W_i$ with a wait time of $\Delta t_i$, with no other spike events during that wait time. This can be written as $P(X_i) = P(W_i,\omega=\Delta t_i) \cdot \prod_{j \neq i} P(W_j, \omega > \Delta t_i)$ where $\omega$ is the wait time for an event.
+  We can now define the likelihood of our observations.  Qualitatively, we can define the probability of each observation as a spike with the given waveform $W_i$ with a wait time of $\Delta t_i$, with no other spike events during that wait time. This can be written as: $P(X_i) = P(W_i,\omega=\Delta t_i) * \Pi _{j\neq i}P(W_j, \omega > \Delta t_i)$ where $\omega$ is the wait time for an event.
+
+  Formally, this can be written in terms of the hazard function ($h$) and survival function ($S$) of a wait time distribution, where each neurons spiking probability is conditionally independent given the context variable $C$. Valid distribution models for this application must have a closed-form parameterizable function for both the hazard and survival term. This gives us a final likelihood for each observation of:
+
+  $P(X_i) = h(\theta_i, \Delta t_i)S(\theta_i, \Delta t_i)*\Pi _{j\neq i}S(\theta_j, \Delta t_i)$
+
+  Where $\theta_i = f(C_{i-1},z_i)$ is the context-dependent parameterization of the firing rate model for each embedded mark.
+
+  Notably as $Z$ is embedded in a continuous mark space, we cannot easily calculate the product of the survival function across all possible marks. Instead, we estimate this distribution with a sample of negative embedded marks from different time points and samples to get.
+
+$P(X_i) \approx h(\theta_i, \Delta t_i)S(\theta_i, \Delta t_i)*\Pi _{j\in {Z_{neg}}}S(\theta_j, \Delta t_i)$
+
+and a loss function:
+
+$L_i = -ln(P(X_i)) = -ln\ h(\theta_i, \Delta t_i)-\Sigma_{j\in \set{Z_i,Z_{neg}}}ln\ S(\theta_j, \Delta t_i)$
+
+#### Comparison to CPC Loss
+
+This approximation is where C3PO derives the contrastive term in it's name. Essentially, the model is encouraged to increase the learned firing rate of neurons in their appropriate contexts and suppress their rate in context where they don't fire.
+
+\\\ToDO: Show poisson derivation case
+
+#### Generalization: spike sequence predictions
+
+In practice, this loss can become difficult to train in cases of high (>1000Hz) multi-unit activity.
+ As the firing rate increases, the $\Delta t$ between marks becomes small, and the number of gradient
+ updates between events on a ~seconds timescale grows large. Practically, this can result
+ in the model learning local, high frequency context variable, rather than slower task-scale
+ variables we may be interested in.
+
+ To help link these timescales during training, we can define our loss at each timestep as the probibility
+ of the next `n_{predict}` embedded marks in the timeseries. The observation in this case is then:
+ $observation_i = \set{(\Delta t_j, Z_j)}|_{i+1 \leq j \leq n_{predict}}$
+
+In the same manner as before, we can define the probability of this observation sequence as:
+
+$P(observation_i) = \prod_{j=i+1}^{n_{predict}} h(\theta_j, \tau_j)S(\theta_j, \tau_j) * \prod_{j\in \set{negative samples}}S(\theta_j,\tau_{i+n_predict})$
+
+Where $\tau_j = \sum_{k=i+1}^{j} \Delta t_j$ is the cumulative wait time to a mark in the predicted sequence.
+Consolidating this dives a loss term:
+
+$L_i = - \sum_{j=i+1}^{n_{predict}} [h(\theta_j, \tau_j) +S (\theta_j, \tau_j)] - \sum_{j\in \set{negative samples}}S(\theta_j,\tau_{i+n_predict})$
 
 # Notes on training hyperparameters
 
 - `n_neg_samples`:
   - _Low values_: less specific prediction required. Need to know when rates are high, but less sensitive to false positives.
-  - _High values_: requires more precision when predicting when a unit fires. Loss term is much more punished for predicting high rates at inappropriate times.
+  - _High values_: requires more precision when predicting when a unit fires. Loss term is much more punished for predicting high rates at innappropriate times
+  - __Conclusion__: When in doubt increase `n_neg`!
 - `batch size`:
   - Changes what your loss is contrasting against:
   - _High values_: Requires that spikes from a trial are different from different states and different trials. Less pressure for contrast within-trial.
