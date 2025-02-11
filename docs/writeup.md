@@ -74,7 +74,7 @@ In practice, this loss can become difficult to train in cases of high (>1000Hz) 
  in the model learning local, high frequency context variable, rather than slower task-scale
  variables we may be interested in.
 
- To help link these timescales during training, we can define our loss at each timestep as the probibility
+ To help link these timescales during training, we can define our loss at each timestep as the probability
  of the next `n_{predict}` embedded marks in the timeseries. The observation in this case is then:
  $observation_i = \set{(\Delta t_j, Z_j)}|_{i+1 \leq j \leq n_{predict}}$
 
@@ -83,7 +83,7 @@ In the same manner as before, we can define the probability of this observation 
 $P(observation_i) = \prod_{j=i+1}^{n_{predict}} h(\theta_j, \tau_j)S(\theta_j, \tau_j) * \prod_{j\in \set{negative samples}}S(\theta_j,\tau_{i+n_predict})$
 
 Where $\tau_j = \sum_{k=i+1}^{j} \Delta t_j$ is the cumulative wait time to a mark in the predicted sequence.
-Consolidating this dives a loss term:
+Consolidating this gives a loss term:
 
 $L_i = - \sum_{j=i+1}^{n_{predict}} [h(\theta_j, \tau_j) +S (\theta_j, \tau_j)] - \sum_{j\in \set{negative samples}}S(\theta_j,\tau_{i+n_predict})$
 
@@ -91,7 +91,7 @@ $L_i = - \sum_{j=i+1}^{n_{predict}} [h(\theta_j, \tau_j) +S (\theta_j, \tau_j)] 
 
 - `n_neg_samples`:
   - _Low values_: less specific prediction required. Need to know when rates are high, but less sensitive to false positives.
-  - _High values_: requires more precision when predicting when a unit fires. Loss term is much more punished for predicting high rates at innappropriate times
+  - _High values_: requires more precision when predicting when a unit fires. Loss term is much more punished for predicting high rates at inappropriate times
   - __Conclusion__: When in doubt increase `n_neg`!
 - `batch size`:
   - Changes what your loss is contrasting against:
