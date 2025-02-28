@@ -524,8 +524,14 @@ class Wavenet(nn.Module):
     layer_kernel_size: Sequence[int]
     context_dim: int  # Number of output channels
     expanded_dim: int
-    smoothing: int = 1
-    categorical: bool = False
+    smoothing: int = (
+        1  # if >1, applies a square filter over the input marks over time to smooth fluctuation in input
+    )
+    categorical: bool = False  # if true , output is softmaxed
+    residual_model: bool = (
+        False  # if true, cumsum the final output. Wavenet is then learning residuals at each timestep
+    )
+    final_smooth: int = 0  # causal smoothing filter on final output
 
     def setup(self):
         self.tanh_layers = [
@@ -563,15 +569,10 @@ class Wavenet(nn.Module):
         self.final_proj = CausalConv1D(self.context_dim, kernel_size=1, use_bias=False)
 
     def __call__(self, x):
-        print("XX", x.shape)
         if self.smoothing > 1:
             x = causal_smoothing(x, self.smoothing)
-        print("XXX", x.shape)
         x = self.initial_layer(x)  # expand from latent to context dimension
         skip_connection = jnp.zeros(x.shape)
-        print(x.shape)
-        # delta_layers = []
-        # residual dilating layers
         for tanh_layer, gating_layer, residual_layer, skip_layer in zip(
             self.tanh_layers,
             self.gating_layers,
@@ -585,62 +586,19 @@ class Wavenet(nn.Module):
             delta = residual_layer(delta)
             x = x + delta
 
-        # skip connection sum
-        # delta_layers = jnp.sum(jnp.array(delta_layers), axis=0)
-        # print(
-        #     "DEBUG",
-        #     delta_layers.shape,
-        #     jnp.array(
-        #         delta_layers,
-        #     ).shape,
-        #     delta_layers[0].shape,
-        # )
-        # delta_layers = jax.nn.relu(delta_layers)
-        # x = self.post_sum(delta_layers)
-        skip_connection = nn.relu(skip_connection)
-        x = self.post_sum(skip_connection)
-        x = jax.nn.relu(x)
-        x = self.final_proj(x)
+        if self.residual_model:
+            print("RESIDUAL", x.shape)
+            x = jnp.cumsum(skip_connection, axis=-2)  # cumsum over time
+
+        else:
+            skip_connection = nn.relu(skip_connection)
+            x = self.post_sum(skip_connection)
+            x = jax.nn.relu(x)
+            x = self.final_proj(x)
         if self.categorical:
             x = jax.nn.softmax(x, axis=-1)
+
+        if self.final_smooth > 1:
+            x = causal_smoothing(x, self.final_smooth)
+
         return x
-
-
-# class Wavenet(nn.Module): V0
-#     """Wavenet Model.
-#     Citation: https://arxiv.org/pdf/1609.03499
-#     """
-
-#     layer_dilations: Sequence[int]
-#     layer_kernel_size: Sequence[int]
-#     layer_features: Sequence[int]
-#     context_dim: int  # Number of output channels
-#     final_kernel_size: int = 10
-
-#     def setup(self):
-#         self.layers = [
-#             DilatedCausalConv1D(
-#                 features=self.layer_features[i],
-#                 kernel_size=self.layer_kernel_size[i],
-#                 dilation=self.layer_dilations[i],
-#             )
-#             for i in range(len(self.layer_dilations))
-#         ]
-#         self.gating_layers = [
-#             DilatedCausalConv1D(
-#                 features=self.layer_features[i],
-#                 kernel_size=self.layer_kernel_size[i],
-#                 dilation=self.layer_dilations[i],
-#             )
-#             for i in range(len(self.layer_dilations))
-#         ]
-#         self.final_conv = CausalConv1D(
-#             features=self.context_dim, kernel_size=self.final_kernel_size
-#         )
-
-#     def __call__(self, x):
-#         for layer, gating_layer in zip(self.layers, self.gating_layers):
-#             x = x + jnp.tanh(layer(x)) * jax.nn.sigmoid(
-#                 gating_layer(x)
-#             )  # Residual Gated activation units
-#         return self.final_conv(x)
