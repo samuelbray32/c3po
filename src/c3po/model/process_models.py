@@ -11,6 +11,7 @@ class ProcessModel:
     """
 
     n_params = None
+    sample_params = None
 
     def log_survival(self, t, params):
         """

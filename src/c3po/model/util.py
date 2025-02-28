@@ -99,7 +99,7 @@ def stabilize_matrix(matrix, delta_matrix=False):
     # eigval_max = jnp.abs(jnp.max(eigvals))
     eigval_max = estimate_largest_eigenvalue(matrix, num_iterations=10)
     # scale the matrix to have the largest eigenvalue less than 1
-    stabilized_matrix = matrix / jnp.maximum(1.0, eigval_max + 1e-5)
+    stabilized_matrix = matrix / jnp.maximum(1.0, eigval_max)
     if delta_matrix:
         stabilized_matrix = stabilized_matrix - jnp.eye(matrix.shape[0])
     return stabilized_matrix

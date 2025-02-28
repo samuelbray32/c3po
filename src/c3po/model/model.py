@@ -14,6 +14,7 @@ from .encoder import encoder_factory
 from .context import context_factory
 from .rate_prediction import rate_prediction_factory
 from .process_models import distribution_dictionary
+from .util import DilatedCausalConv1D
 
 
 class Embedding(nn.Module):
@@ -38,9 +39,8 @@ class Embedding(nn.Module):
             self.rnn_context = False
 
         if self.convolutional is not None:
-            raise ValueError("Convolutional context not stably implemented.")
             self.convolutional_layers = [
-                nn.Conv(**layer, padding="SAME") for layer in self.convolutional
+                DilatedCausalConv1D(**layer) for layer in self.convolutional
             ]
         else:
             self.convolutional_layers = []
@@ -65,7 +65,6 @@ class Embedding(nn.Module):
 
         if len(self.convolutional_layers) > 0:
             # idea I was playing with prior to wavenet. will remove if wavenet continues to perform well
-            raise ValueError("Convolutional context not stably implemented.")
             for layer in self.convolutional_layers[:-1]:
                 c = layer(c)
                 c = nn.leaky_relu(c)
@@ -88,6 +87,32 @@ class C3PO(nn.Module):
     n_neg_samples: int
     predicted_sequence_length: int = 1
     context_convolutional: Sequence[dict] = None
+    sample_params: str = None
+    """
+    C3PO model for continuous time point processes.
+    Parameters:
+    encoder_args: dict
+        Arguments for the encoder model
+    context_args: dict
+        Arguments for the context model
+    rate_args: dict
+        Arguments for the rate prediction model
+    distribution: str
+        The distribution of the spiking process
+    latent_dim: int
+        The dimension of the latent space (Z)
+    context_dim: int
+        The dimension of the context space (C)
+    n_neg_samples: int
+        The number of negative samples to draw
+    predicted_sequence_length: int, optional
+        The length of the predicted sequence. The default is 1.
+    context_convolutional: Sequence[dict], optional
+        The convolutional layers post model. The default is None. Not stably implemented.
+    sample_params: str, optional
+        The method to sample the parameters. The default is None. Valid options are None, "gaussian".
+
+    """
 
     def setup(self):
         self.embedding = Embedding(
@@ -98,11 +123,14 @@ class C3PO(nn.Module):
             convolutional=self.context_convolutional,
         )
         self.distribution_class = distribution_dictionary[self.distribution]()
+        n_params = self.distribution_class.n_params
+        if self.sample_params == "gaussian":
+            n_params = 2 * n_params
         self.rate_prediction = rate_prediction_factory(
             **self.rate_args,
             latent_dim=self.latent_dim,
             context_dim=self.context_dim,
-            n_params=self.distribution_class.n_params
+            n_params=n_params,
         )
 
     def _distribution_object(self):
@@ -159,6 +187,8 @@ class C3PO(nn.Module):
         delta_t,
         sample_step=1,  # None,
         scale_neg_samples=30,
+        rand_key=None,
+        prior_params=None,
     ):
         """C3PO loss function for length n_predict and generic process.
         Parameters:
@@ -177,7 +207,7 @@ class C3PO(nn.Module):
         """
         if sample_step is None:
             sample_step = self.predicted_sequence_length
-            
+
         delta_t_stacked = jnp.concatenate(
             [
                 jnp.expand_dims(
@@ -189,8 +219,36 @@ class C3PO(nn.Module):
         )
         cum_delta_t = jnp.cumsum(delta_t_stacked, axis=1)
 
-        # print("cum_delta_t", cum_delta_t.shape, delta_t_stacked.shape)
-        # print("pos_parameters", pos_parameters.shape)
+        # sample parameters if needed
+        if self.sample_params is "gaussian":
+            n_sigma = pos_parameters.shape[-1] // 2
+            sigma_regularization = jnp.mean(
+                jnp.log1p(jnp.exp(pos_parameters[..., n_sigma:]))
+            ) + jnp.mean(
+                jnp.log1p(jnp.exp(neg_parameters[..., n_sigma:]))
+            )  # average variance
+            sigma_regularization = 1 / sigma_regularization
+            pos_parameters, log_pos_sample_prob = self.gauss_sample(
+                rand_key, pos_parameters
+            )
+            neg_parameters, log_neg_sample_prob = self.gauss_sample(
+                rand_key, neg_parameters
+            )
+            mu_pos = pos_parameters[..., :n_sigma]
+            mu_neg = neg_parameters[..., :n_sigma]
+            sigma_pos = jnp.log1p(jnp.exp(pos_parameters[..., n_sigma:]))
+            sigma_neg = jnp.log1p(jnp.exp(neg_parameters[..., n_sigma:]))
+            kl_div_pos = jnp.log(prior_params["sigma"] / sigma_pos) + (
+                (sigma_pos**2 + (mu_pos - prior_params["mu"]) ** 2)
+                / (2 * prior_params["sigma"] ** 2)
+                - 0.5
+            )
+            kl_div_neg = jnp.log(prior_params["sigma"] / sigma_neg) + (
+                (sigma_neg**2 + (mu_neg - prior_params["mu"]) ** 2)
+                / (2 * prior_params["sigma"] ** 2)
+                - 0.5
+            )
+
         # hazard evaluation for when things fired
         hazard_term = self._distribution_object().log_hazard(
             cum_delta_t, pos_parameters[:, :, 1:]
@@ -209,7 +267,21 @@ class C3PO(nn.Module):
             + jnp.sum(neg_survival_term, axis=1)[..., ::sample_step]
             + jnp.sum(pos_survival_term, axis=1)[..., ::sample_step] * scale_neg_samples
         )
+
+        if self.sample_params is "gaussian":
+            # add the log probability of the samples
+            neg_log_p += (jnp.sum(kl_div_pos) + jnp.sum(kl_div_neg)) * 10.0
+
         return jnp.mean(neg_log_p)
+
+    @staticmethod
+    def gauss_sample(key, params):
+        n_params = params.shape[-1] // 2
+        mu = params[..., :n_params]
+        sigma = jnp.log1p(jnp.exp(params[..., n_params:]))
+        sample_vals = jax.random.normal(key, mu.shape)
+        log_sample_prob = -0.5 * jnp.log(2 * jnp.pi) - sample_vals**2 / 2
+        return sample_vals * sigma + mu, log_sample_prob
 
 
 def get_neg_samples_batch(z, n_neg_samples, rand_key):

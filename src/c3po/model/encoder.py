@@ -25,7 +25,8 @@ def encoder_factory(encoder_model: str, latent_dim: int, **kwargs) -> BaseEncode
         return MultiShankEncoderV0(latent_dim=latent_dim, **kwargs)
     if encoder_model == "multi_shank_v1":
         return MultiShankEncoderV1(latent_dim=latent_dim, **kwargs)
-
+    if encoder_model == "sorted_spikes":
+        return SortedSpikesEncoder(latent_dim=latent_dim, **kwargs)
     else:
         raise ValueError(f"Unknown encoder model: {encoder_model}")
 
@@ -177,3 +178,21 @@ class MultiShankEncoderV1(BaseEncoder):
             # Scatter the encoded data back
             outputs = outputs.at[idxs].set(encoded_data)
         return outputs[:-1]
+
+
+class SortedSpikesEncoder(BaseEncoder):
+    """Embeds sorted spike data
+    input data should be one-hot encoded
+    """
+
+    n_units: int
+
+    def setup(self):
+        self.m = self.param(
+            "encoder_matrix",
+            nn.initializers.he_uniform(),
+            (self.n_units, self.latent_dim),
+        )
+
+    def __call__(self, x):
+        return jnp.dot(x, self.m)
