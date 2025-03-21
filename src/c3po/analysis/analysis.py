@@ -1,6 +1,7 @@
 import numpy as np
 from spyglass.common import interval_list_contains_ind
 from sklearn.decomposition import PCA
+from tqdm import tqdm
 
 import jax
 
@@ -167,6 +168,21 @@ class C3poAnalysis:
 
     # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
+    def _select_data(self, pca, interpolated):
+        if pca and interpolated:
+            t_data = self.t_interp
+            c_data = self.c_pca_interp
+        elif pca and not interpolated:
+            t_data = self.t
+            c_data = self.c
+        elif not pca and interpolated:
+            t_data = self.t_interp
+            c_data = self.c_interp
+        elif not pca and not interpolated:
+            t_data = self.t
+            c_data = self.c_interp
+
+        return t_data, c_data
 
     def bin_context_by_feature(
         self,
@@ -187,18 +203,7 @@ class C3poAnalysis:
             valid_intervals (np.ndarray, optional): Intervals to consider. Defaults to None.
         """
         self._check_embedded_data()
-        if pca and interpolated:
-            t_data = self.t_interp
-            c_data = self.c_pca_interp
-        elif pca and not interpolated:
-            t_data = self.t
-            c_data = self.c
-        elif not pca and interpolated:
-            t_data = self.t_interp
-            c_data = self.c_interp
-        elif not pca and not interpolated:
-            t_data = self.t
-            c_data = self.c_interp
+        t_data, c_data = self._select_data(pca, interpolated)
 
         if valid_intervals is None:
             valid_intervals = np.array(
@@ -221,7 +226,6 @@ class C3poAnalysis:
         context_features = feature[context_to_feature_ind]
 
         context_binned = []
-        c = self.c_pca if pca else self.c
         for i in range(len(bins) - 1):
             ind_bin = np.logical_and(
                 context_features > bins[i], context_features < bins[i + 1]
@@ -229,16 +233,120 @@ class C3poAnalysis:
             context_binned.append(c_data[ind_context][ind_bin])
         return context_binned, bins
 
-        # context_binned = []
-        # for i in range(len(bins) - 1):
-        #     ind_bin = np.logical_and(
-        #         feature[ind_feature] > bins[i], feature[ind_feature] < bins[i + 1]
-        #     )
-        #     context_binned.append(self.c[ind_context][ind_bin])
-        # return context_binned
+    def bin_context_by_feature_2d(
+        self,
+        feature_1: np.ndarray,
+        feature_1_times: np.ndarray,
+        feature_2: np.ndarray,
+        feature_2_times: np.ndarray,
+        bins_1=None,
+        bins_2=None,
+        valid_intervals=None,
+        pca=False,
+        interpolated=False,
+    ):
+        """
+        Bin the context by co-occurring feature values
+
+        Args:
+            feature_1 (np.ndarray): Feature values. Shape (n_samples,).
+            feature_1_times (np.ndarray): Times of the feature values. Shape (n_samples,).
+            feature_2 (np.ndarray): Feature values. Shape (n_samples,).
+            feature_2_times (np.ndarray): Times of the feature values. Shape (n_samples,).
+            bins (int, optional): Number of bins to use. Defaults to None.
+            valid_intervals (np.ndarray, optional): Intervals to consider. Defaults to None.
+        """
+        # select and parse data
+        self._check_embedded_data()
+        t_data, c_data = self._select_data(pca, interpolated)
+        if valid_intervals is None:
+            valid_intervals = np.array(
+                [
+                    [
+                        np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
+                        np.min([feature_1_times[-1], feature_2_times[-1], t_data[-1]]),
+                    ]
+                ]
+            )
+
+        if bins_1 is None:
+            ind_feature_1 = interval_list_contains_ind(valid_intervals, feature_1_times)
+            bins_1 = np.linspace(
+                np.min(feature_1[ind_feature_1]), np.max(feature_1[ind_feature_1]), 30
+            )
+        if bins_2 is None:
+            ind_feature_2 = interval_list_contains_ind(valid_intervals, feature_2_times)
+            bins_2 = np.linspace(
+                np.min(feature_2[ind_feature_2]), np.max(feature_2[ind_feature_2]), 30
+            )
+
+        ind_context = interval_list_contains_ind(valid_intervals, t_data)
+
+        # map context timepoints to feature values
+        context_to_feature_1_ind = np.digitize(t_data[ind_context], feature_1_times)
+        context_features_1 = feature_1[context_to_feature_1_ind]
+        context_to_feature_2_ind = np.digitize(t_data[ind_context], feature_2_times)
+        context_features_2 = feature_2[context_to_feature_2_ind]
+
+        # map feature values to bins
+        feature_1_bin = np.digitize(context_features_1, bins_1, right=True) - 1
+        feature_2_bin = np.digitize(context_features_2, bins_2, right=True) - 1
+
+        # context_binned = [[[] for _ in range(len(bins_2))] for _ in range(len(bins_1))]
+        # for i, (b1, b2) in tqdm(enumerate(zip(feature_1_bin, feature_2_bin))):
+        #     context_binned[b1][b2].append(c_data[ind_context][i])
+        # return context_binned, bins_1, bins_2
+
+        # Remove out-of-range bins
+        import pandas as pd
+
+        # Create a mask to filter values within valid bin ranges
+        valid_mask = (
+            (feature_1_bin >= 0)
+            & (feature_1_bin < len(bins_1))
+            & (feature_2_bin >= 0)
+            & (feature_2_bin < len(bins_2))
+        )
+
+        feature_1_bin = feature_1_bin[valid_mask]
+        feature_2_bin = feature_2_bin[valid_mask]
+
+        # values now has shape (n_samples, n_dim)
+        values = c_data[ind_context][valid_mask]
+
+        # Create a DataFrame. Convert each row of the 2D array to a list/array.
+        df = pd.DataFrame({"b1": feature_1_bin, "b2": feature_2_bin})
+        # List conversion so each element is an array of shape (n_dim,)
+        df["val"] = list(values)
+
+        # Group by bin indices and stack the arrays for each group.
+        grouped = (
+            df.groupby(["b1", "b2"])["val"]
+            .apply(lambda x: np.stack(x.to_list()))
+            .reset_index()
+        )
+
+        # Create an empty list-of-lists structure for the binned data.
+        max_b1, max_b2 = len(bins_1), len(bins_2)
+        context_binned = [[[] for _ in range(max_b2)] for _ in range(max_b1)]
+
+        # Populate the bins using the grouped data.
+        for _, row in grouped.iterrows():
+            b1, b2 = int(row.b1), int(row.b2)
+            context_binned[b1][
+                b2
+            ] = row.val  # Each is now an array of shape (n_bin, n_dim)
+
+        return context_binned, bins_1, bins_2
+
+    from typing import Optional, Tuple
 
     def alligned_response(
-        self, marks: np.ndarray, t_plot: tuple[float, float], pca=True
+        self,
+        marks: np.ndarray,
+        t_plot: tuple[float, float],
+        pca=True,
+        passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ):
         """
         Look at the model "response function" around the mark times
@@ -246,19 +354,26 @@ class C3poAnalysis:
         Args:
             marks (np.ndarray): Time points to allign to (in seconds) (ex. stimulus, reward, neuron firing).
             t_plot (tuple(float,float)): Time window to plot around each mark time (ex. (-.1,.5)).
+            pca (bool, optional): Use PCA context. Defaults to True.
+            passed_data (Optional[Tuple[np.ndarray, np.ndarray]], optional): Passed data. Defaults to None.
         """
-        # interpolate the context if not already done
-        try:
-            self._check_interpolated_data()
-        except ValueError:
-            self.interpolate_context()
-            self.embed_context_pca()
 
-        c_data = self.c_pca_interp if pca else c_interp
+        if passed_data is None:
+            # interpolate the context if not already done
+            try:
+                self._check_interpolated_data()
+            except ValueError:
+                self.interpolate_context()
+                self.embed_context_pca()
 
-        dt = np.median(np.diff(self.t_interp))
+            c_data = self.c_pca_interp if pca else self.c_interp
+            t_data = self.t_interp
+        else:
+            c_data, t_data = passed_data
+
+        dt = np.median(np.diff(t_data))
         window = int(t_plot[0] / dt), int(t_plot[1] / dt)
-        mark_inds = np.digitize(marks, self.t_interp) - 1
+        mark_inds = np.digitize(marks, t_data) - 1
         mark_inds = mark_inds[
             np.logical_and(
                 mark_inds + window[0] >= 0, mark_inds + window[1] < c_data.shape[0]
@@ -277,3 +392,27 @@ class C3poAnalysis:
         self._check_embedded_data()
         if any(val is None for val in [self.t_interp, self.c_interp]):
             raise ValueError("Data not interpolated yet")
+
+
+def bootstrap_traces(
+    data,
+    sample_size=None,
+    statistic=np.mean,
+    n_boot=1e3,
+    conf_interval=95,
+):
+    if sample_size is None:
+        sample_size = data.shape[0]
+    bootstrap = []
+    #     for i in tqdm(range(int(n_boot)),position=0,leave=True):
+    for i in range(int(n_boot)):
+        bootstrap.append(
+            statistic(
+                data[np.random.choice(np.arange(data.shape[0]), sample_size), :], axis=0
+            )
+        )
+    bootstrap = np.array(bootstrap)
+    return np.mean(bootstrap, axis=0), [
+        np.percentile(bootstrap, (100 - conf_interval) / 2, axis=0),
+        np.percentile(bootstrap, conf_interval + (100 - conf_interval) / 2, axis=0),
+    ]
