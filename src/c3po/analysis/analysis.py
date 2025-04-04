@@ -56,6 +56,8 @@ class C3poAnalysis:
         chunk_size: int = 50000,
         chunk_padding: int = 2000,
         delta_t_units: str = "ms",
+        store_data: bool = True,
+        chunk_data: bool = True,
     ):
         """Embed the full mark series into  Z and C.
         Uses chunking and padding to avoid memory issues.
@@ -70,7 +72,7 @@ class C3poAnalysis:
         """
 
         # clear existing stored data to avoid confusion
-        if not all([(val is None) for val in [self.z, self.c, self.t]]):
+        if store_data and not all([(val is None) for val in [self.z, self.c, self.t]]):
             Warning("Clearing existing data")
             self.z = None
             self.c = None
@@ -91,21 +93,21 @@ class C3poAnalysis:
             ).apply(self.embedding_params, x, delta_t)
 
         i = chunk_padding
-        from tqdm import tqdm
 
-        pbar = tqdm(total=x.shape[1])
-        while i < (x.shape[1] - chunk_size):
-            z_i, c_i = embed_chunk(
-                x[:, i - chunk_padding : i + chunk_size],
-                delta_t[:, i - chunk_padding : i + chunk_size],
-            )
-            z[i : i + chunk_size] = z_i[0, chunk_padding:]
-            c[i : i + chunk_size] = c_i[0, chunk_padding:]
-            i += chunk_size
-            pbar.update(chunk_size)
-
-        self.z = np.array(z)
-        self.c = np.array(c)
+        if chunk_data:
+            pbar = tqdm(total=x.shape[1])
+            while i < (x.shape[1] - chunk_size):
+                z_i, c_i = embed_chunk(
+                    x[:, i - chunk_padding : i + chunk_size],
+                    delta_t[:, i - chunk_padding : i + chunk_size],
+                )
+                z[i : i + chunk_size] = z_i[0, chunk_padding:]
+                c[i : i + chunk_size] = c_i[0, chunk_padding:]
+                i += chunk_size
+                pbar.update(chunk_size)
+            pbar.close()
+        else:
+            z, c = embed_chunk(x, delta_t)
 
         # store the markls times in unix time
         t = np.cumsum(delta_t)
@@ -113,7 +115,12 @@ class C3poAnalysis:
             t *= 1e-3
         elif delta_t_units not in ["s", "ms"]:
             raise ValueError(f"delta_t_units must be 's' or 'ms' not {delta_t_units}")
-        self.t = t + first_mark_time
+
+        if store_data:
+            self.z = np.array(z)
+            self.c = np.array(c)
+            self.t = t + first_mark_time
+        return z, c, t + first_mark_time
 
     def interpolate_context(self, t: np.ndarray = None):
         """Interpolate the context
