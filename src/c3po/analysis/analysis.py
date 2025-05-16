@@ -107,7 +107,11 @@ class C3poAnalysis:
                 pbar.update(chunk_size)
             pbar.close()
         else:
-            z, c = embed_chunk(x, delta_t)
+            z, c = embed_chunk(x[None, ...], delta_t[None, ...])
+            z = np.array(z[0])
+            c = np.array(c[0])
+            z[:chunk_padding] = np.nan
+            c[:chunk_padding] = np.nan
 
         # store the markls times in unix time
         t = np.cumsum(delta_t)
@@ -169,9 +173,13 @@ class C3poAnalysis:
             raise ValueError("pca must first be fit to data")
 
         if self.c_pca is None:
-            self.c_pca = self.pca.transform(self.c)
+            self.c_pca = np.ones_like(self.c) * np.nan
+            ind_valid = (~np.isnan(self.c)).any(axis=1)
+            self.c_pca[ind_valid] = self.pca.transform(self.c[ind_valid])
         if self.c_interp is not None and self.c_pca_interp is None:
-            self.c_pca_interp = self.pca.transform(self.c_interp)
+            self.c_pca_interp = np.ones_like(self.c_interp) * np.nan
+            ind_valid = (~np.isnan(self.c_interp)).any(axis=1)
+            self.c_pca_interp[ind_valid] = self.pca.transform(self.c_interp[ind_valid])
 
     # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
@@ -181,13 +189,13 @@ class C3poAnalysis:
             c_data = self.c_pca_interp
         elif pca and not interpolated:
             t_data = self.t
-            c_data = self.c
+            c_data = self.c_pca
         elif not pca and interpolated:
             t_data = self.t_interp
             c_data = self.c_interp
         elif not pca and not interpolated:
             t_data = self.t
-            c_data = self.c_interp
+            c_data = self.c
 
         return t_data, c_data
 
