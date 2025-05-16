@@ -181,6 +181,7 @@ class C3poAnalysis:
             ind_valid = (~np.isnan(self.c_interp)).any(axis=1)
             self.c_pca_interp[ind_valid] = self.pca.transform(self.c_interp[ind_valid])
 
+
     # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
     def _select_data(self, pca, interpolated):
@@ -190,6 +191,7 @@ class C3poAnalysis:
         elif pca and not interpolated:
             t_data = self.t
             c_data = self.c_pca
+
         elif not pca and interpolated:
             t_data = self.t_interp
             c_data = self.c_interp
