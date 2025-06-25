@@ -395,9 +395,25 @@ class C3poAnalysis:
             )
         ]
         response = []
-        for i in mark_inds:
-            response.append(c_data[i + window[0] : i + window[1]])
-        return np.array(response)
+        response_ind_array = np.arange(window[0], window[1])
+        response_ind_array = response_ind_array[None, :] + mark_inds[:, None]
+        response_ind_array = response_ind_array.flatten()
+        mark_inds = mark_inds.flatten()
+        if response_ind_array.size == 0:
+            return np.array([])
+        if c_data.ndim == 1:
+            response = c_data[response_ind_array].reshape(
+                (len(mark_inds), window[1] - window[0])
+            )
+        else:
+            response = c_data[response_ind_array, :].reshape(
+                (len(mark_inds), window[1] - window[0], c_data.shape[1])
+            )
+        return response
+
+        # for i in mark_inds:
+        #     response.append(c_data[i + window[0] : i + window[1]])
+        # return np.array(response)
 
     def _check_embedded_data(self):
         if any(val is None for val in [self.z, self.c, self.t]):
