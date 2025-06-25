@@ -411,10 +411,6 @@ class C3poAnalysis:
             )
         return response
 
-        # for i in mark_inds:
-        #     response.append(c_data[i + window[0] : i + window[1]])
-        # return np.array(response)
-
     def _check_embedded_data(self):
         if any(val is None for val in [self.z, self.c, self.t]):
             raise ValueError("Data not embedded yet")
