@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Sequence, Any
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -833,12 +833,6 @@ class WavenetV2(nn.Module):
 """
 CAUSAL TRANSFORMER
 """
-# causal_transformer.py
-from typing import Sequence, Tuple, Any
-import jax.numpy as jnp
-import flax.linen as nn
-from .util import causal_smoothing  # already in your repo
-
 
 def _split_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
     B, T, D = x.shape
