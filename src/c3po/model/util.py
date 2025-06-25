@@ -4,6 +4,7 @@ import flax.linen as nn
 import jax.numpy as jnp
 import jax
 import numpy as np
+from jax.scipy.special import logsumexp
 
 
 class MLP(nn.Module):
@@ -237,7 +238,7 @@ class DilatedCausalConv1D(CausalConv1D):
 from functools import partial
 
 
-def causal_smoothing(x, filter_size=10):
+def causal_smoothing(x, filter_size=10, decay=None):
     pad_width = filter_size - 1  # Causal padding amount
     # Pad input with zeros on the left
     x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="constant")
@@ -245,9 +246,47 @@ def causal_smoothing(x, filter_size=10):
     # window = jnp.ones((filter_size, x.shape[-1])) / filter_size
     # x = jax.lax.conv_general_dilated(x_padded, window, padding="VALID",window_strides=1)
 
-    window = jnp.ones((filter_size,)) / filter_size
+    if decay is None:
+        window = jnp.ones((filter_size,)) / filter_size
+    else:
+        window = jnp.array([decay**i for i in range(filter_size)])
+        window = window / jnp.sum(window)
+
     conv = lambda y: jnp.convolve(y, window, mode="valid")
     x = jax.vmap(jax.vmap(conv, in_axes=-1, out_axes=-1), in_axes=0, out_axes=0)(
         x_padded
     )
     return x  # [:, pad_width:]
+
+
+def chunked_logsumexp(
+    x: jnp.ndarray, axis: int = 1, chunk_size: int = 64
+) -> jnp.ndarray:
+    """
+    Computes logsumexp over a large axis by breaking into smaller chunks.
+
+    Parameters
+    ----------
+    x : jnp.ndarray
+        Input tensor of shape (..., axis_size, ...)
+    axis : int
+        Axis to reduce with logsumexp.
+    chunk_size : int
+        Size of each chunk to reduce at a time.
+
+    Returns
+    -------
+    jnp.ndarray
+        Tensor with logsumexp computed over the given axis.
+    """
+    if chunk_size > x.shape[axis]:
+        # If chunk size is larger than the axis, just compute logsumexp directly
+        return logsumexp(x, axis=axis)
+    x = jnp.moveaxis(x, axis, 0)  # Put axis to front for chunking
+    n = x.shape[0]
+    chunks = [x[i : i + chunk_size] for i in range(0, n, chunk_size)]
+
+    # Compute logsumexp over each chunk
+    chunk_lse = jnp.stack([logsumexp(c, axis=0) for c in chunks], axis=0)
+
+    return chunked_logsumexp(chunk_lse, axis=0, chunk_size=chunk_size)

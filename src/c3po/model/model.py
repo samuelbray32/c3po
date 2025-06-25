@@ -7,6 +7,7 @@ if os.environ.get("CUDA_VISIBLE_DEVICES", None) is None:
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from jax.scipy.special import logsumexp
 from functools import partial
 from typing import Sequence
 
@@ -14,7 +15,7 @@ from .encoder import encoder_factory
 from .context import context_factory
 from .rate_prediction import rate_prediction_factory
 from .process_models import distribution_dictionary
-from .util import DilatedCausalConv1D
+from .util import DilatedCausalConv1D, chunked_logsumexp
 
 
 class Embedding(nn.Module):
@@ -88,6 +89,7 @@ class C3PO(nn.Module):
     predicted_sequence_length: int = 1
     context_convolutional: Sequence[dict] = None
     sample_params: str = None
+    return_embeddings_in_call: bool = False
     """
     C3PO model for continuous time point processes.
     Parameters:
@@ -137,6 +139,7 @@ class C3PO(nn.Module):
         return distribution_dictionary[self.distribution]()
 
     def __call__(self, x, delta_t, rand_key):
+        # Embed the marks and get the context
         z, c = self.embedding(
             x, delta_t
         )  # z = (n_marks, latent_dim), c = (n_marks, context_dim)
@@ -144,15 +147,26 @@ class C3PO(nn.Module):
             z, self.n_neg_samples, rand_key
         )  # (n_marks, n_neg_samples, latent_dim)
 
-        vmap_params = jax.vmap(self.rate_prediction, in_axes=(0), out_axes=0)
+        # Stack sequences for prediction. sample z_stacked[n_batch,i] corresponds to the
+        # sequence following the i-th mark in the batch.
+        # This is done to allow the rate prediction model to predict the rates for the next
+        # predicted_sequence_length marks after each mark in the batch.
         z_stacked = jnp.concat(
             [
-                jnp.expand_dims(z[:, i : -self.predicted_sequence_length + i], axis=1)
+                jnp.expand_dims(
+                    z[:, 1 + i : z.shape[1] - self.predicted_sequence_length + i + 1],
+                    axis=1,
+                )
                 for i in range(self.predicted_sequence_length)
             ],
             axis=1,
         )  # (n_marks-predicted_sequence_length, predicted_sequence_length, latent_dim,
-        print(z_stacked.shape)
+        print("z_stacked", z_stacked.shape)
+
+        # predict the rate parameters for the the observed sequences
+        # rates of sequences following time i (z_stacked[n_batch,i]) are predicted
+        # from context at time i (c[n_batch,i])
+        vmap_params = jax.vmap(self.rate_prediction, in_axes=(0), out_axes=0)
         pos_params = jax.vmap(
             lambda zi: vmap_params(zi, c[:, : -self.predicted_sequence_length]),
             in_axes=1,
@@ -161,9 +175,10 @@ class C3PO(nn.Module):
             z_stacked
         )  # (n_marks-predicted_sequence_length, predicted_sequence_length, n_params)
 
-        print(z.shape, pos_params.shape)
+        print("Z", z.shape, "pos_params", pos_params.shape)
         print("neg_z", neg_z.shape)
         print("c", c.shape)
+        # predict the rate parameters for the negative samples
         neg_params = jax.vmap(
             lambda zi: vmap_params(zi, c[:, : -self.predicted_sequence_length]),
             in_axes=1,
@@ -174,6 +189,14 @@ class C3PO(nn.Module):
 
         # cum_neg_rates = jnp.sum(neg_rates, axis=1)  # (n_marks)
 
+        if self.return_embeddings_in_call:
+            return (
+                pos_params,
+                neg_params,
+                z[:, :],
+                c[:, :],
+                neg_z[:, :, self.predicted_sequence_length :],
+            )
         return pos_params, neg_params
 
     def embed(self, x, delta_t):
@@ -186,7 +209,7 @@ class C3PO(nn.Module):
         neg_parameters,
         delta_t,
         sample_step=1,  # None,
-        scale_neg_samples=30,
+        n_emission_sources=20,
         rand_key=None,
         prior_params=None,
     ):
@@ -207,7 +230,6 @@ class C3PO(nn.Module):
         """
         if sample_step is None:
             sample_step = self.predicted_sequence_length
-
         delta_t_stacked = jnp.concatenate(
             [
                 jnp.expand_dims(
@@ -258,21 +280,109 @@ class C3PO(nn.Module):
         neg_survival_term = self._distribution_object().log_survival(
             cum_delta_t[:, -1][:, None, :], neg_parameters[:, :, 1:]
         )
+        neg_survival_term = jnp.mean(neg_survival_term, axis=1) * n_emission_sources
+
         pos_survival_term = self._distribution_object().log_survival(
             cum_delta_t[:, :-1], pos_parameters[:, 1:, 1:]
         )
 
+        print("neg_survival_term", neg_survival_term.shape)
+        print("pos_survival_term", pos_survival_term.shape)
+        print("hazard_term", hazard_term.shape)
+
         neg_log_p = -(
             jnp.sum(hazard_term, axis=1)[..., ::sample_step]
-            + jnp.sum(neg_survival_term, axis=1)[..., ::sample_step]
-            + jnp.sum(pos_survival_term, axis=1)[..., ::sample_step] * scale_neg_samples
-        )
+            + neg_survival_term[..., ::sample_step]
+            + jnp.sum(pos_survival_term, axis=1)[..., ::sample_step]
+        )  # TODO: scale neg samples ?
 
         if self.sample_params is "gaussian":
             # add the log probability of the samples
             neg_log_p += (jnp.sum(kl_div_pos) + jnp.sum(kl_div_neg)) * 10.0
 
         return jnp.mean(neg_log_p)
+
+    def contrastive_sequence_loss(
+        self,
+        pos_parameters,
+        neg_parameters,
+        delta_t,
+        z,
+        neg_z,
+    ):
+        """C3PO loss function for length n_predict and generic process.
+        Parameters:
+        pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
+        neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
+        delta_t: jnp.array of shape (batch_size, n_timepoints)
+        sample_step: int, optional
+            The step to sample the loss. The default is 1.
+            Useful to prevent issues with long predicted sequences.
+        scale_neg_samples: int, optional
+            The scaling factor for the negative samples. The default is 10.
+            This simulates increased number of negative samples without the memory cost.
+
+        Returns:
+            jnp.array: the loss value
+        """
+        delta_t_stacked = jnp.concatenate(
+            [
+                jnp.expand_dims(
+                    delta_t[:, 1 + i : -self.predicted_sequence_length + i], axis=1
+                )
+                for i in range(self.predicted_sequence_length)
+            ],
+            axis=1,
+        )
+        cum_delta_t = jnp.cumsum(delta_t_stacked, axis=1)
+
+        # hazard evaluation for when things fired
+        pos_log_hazard_term = self._distribution_object().log_hazard(
+            cum_delta_t, pos_parameters[:, :, 1:]
+        )
+
+        neg_log_hazard_term = self._distribution_object().log_hazard(
+            cum_delta_t[:, -1][:, None, :], neg_parameters[:, :, 1:]
+        )
+        neg_log_hazard_term = jnp.concatenate(
+            [neg_log_hazard_term, pos_log_hazard_term], axis=1
+        )
+
+        def log_noise_hazard(z):
+            # V1: assume intensity of noise falls off with L2 norm
+            return -1 * jnp.sum(z**2, axis=-1)  # Gaussian hazard
+
+        pos_log_noise_hazard_term = log_noise_hazard(z)[
+            :, 1:
+        ]  # (n_batch, n_timepoints, latent_dim)
+        neg_log_noise_hazard_term = log_noise_hazard(neg_z)[:, :, 1:]
+        neg_log_noise_hazard_term = jnp.concatenate(
+            [neg_log_noise_hazard_term, pos_log_noise_hazard_term[:, None, :]], axis=1
+        )
+
+        # neg_term = logsumexp(neg_log_hazard_term - neg_log_noise_hazard_term, axis=1)
+        neg_term = chunked_logsumexp(
+            neg_log_hazard_term - neg_log_noise_hazard_term, axis=1, chunk_size=8
+        )
+        loss = -pos_log_hazard_term + pos_log_noise_hazard_term + neg_term
+        return jnp.mean(loss)
+
+    # def noise_hazard(self, z):
+    #     # V1: assume intensity of noise falls off with distance
+    #     return ((2 * 3.14) ** (self.latent_dim / 2)) * jnp.exp(
+    #         -jnp.dot(
+    #             z,
+    #             z,
+    #         )
+    #         / 2
+    #     )  # Gaussian hazard
+
+    # def log_noise_hazard(self, z):
+    #     # V1: assume intensity of noise falls off with distance
+    #     return (self.latent_dim / 2) * jnp.log(2 * 3.14) - jnp.dot(
+    #         z,
+    #         z,
+    #     ) / 2  # Gaussian hazard
 
     @staticmethod
     def gauss_sample(key, params):
