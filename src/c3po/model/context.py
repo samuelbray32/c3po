@@ -1,4 +1,4 @@
-from typing import Sequence
+from typing import Sequence, Any
 import numpy as np
 import jax
 import jax.numpy as jnp
@@ -39,6 +39,18 @@ def context_factory(context_model: str, context_dim: int, **kwargs):
     elif context_model == "wavenet":
         kwargs.pop("infer_init", None)
         return Wavenet(context_dim=context_dim, **kwargs)
+    elif context_model == "wavenet_v2":
+        kwargs.pop("infer_init", None)
+        return nn.remat(WavenetV2)(context_dim=context_dim, **kwargs)
+    elif context_model == "causalTransformer":
+        kwargs.pop("infer_init", None)  # not an RNN cell
+        return CausalTransformer(context_dim=context_dim, **kwargs)
+    elif context_model == "samsTransformer":
+        kwargs.pop("infer_init", None)
+        return SamsCausalTransformer(context_dim=context_dim, **kwargs)
+    elif context_model == "slidingWindow":
+        kwargs.pop("infer_init", None)
+        return SlidingWindow(context_dim=context_dim, **kwargs)
     else:
         raise ValueError(f"Unknown context model: {context_model}")
 
@@ -515,6 +527,24 @@ class HeirarchicalRNN(BaseContext):
         return state, [0 for _ in self.dynamics]
 
 
+class SlidingWindow(nn.Module):
+    """Simple model that applies a causal smoothing filter over the input marks
+    Requires that context and latent space arer same dimension. Used for rapid training
+    architecture
+    """
+
+    context_dim: int
+    window_size: int
+    smoothing_decay: float = (
+        None  # if not None, causal smoothing filter has exponential decay
+    )
+
+    def __call__(self, x):
+        return causal_smoothing(
+            x[..., :-1], self.window_size, decay=self.smoothing_decay
+        )
+
+
 class Wavenet(nn.Module):
     """Wavenet Model.
     Citation: https://arxiv.org/pdf/1609.03499
@@ -526,6 +556,9 @@ class Wavenet(nn.Module):
     expanded_dim: int
     smoothing: int = (
         1  # if >1, applies a square filter over the input marks over time to smooth fluctuation in input
+    )
+    smoothing_decay: float = (
+        None  # if not None, causal smoothing filter has exponential decay
     )
     categorical: bool = False  # if true , output is softmaxed
     residual_model: bool = (
@@ -570,7 +603,7 @@ class Wavenet(nn.Module):
 
     def __call__(self, x):
         if self.smoothing > 1:
-            x = causal_smoothing(x, self.smoothing)
+            x = causal_smoothing(x, self.smoothing, decay=self.smoothing_decay)
         x = self.initial_layer(x)  # expand from latent to context dimension
         skip_connection = jnp.zeros(x.shape)
         for tanh_layer, gating_layer, residual_layer, skip_layer in zip(
@@ -602,3 +635,521 @@ class Wavenet(nn.Module):
             x = causal_smoothing(x, self.final_smooth)
 
         return x
+
+
+class WavenetV2(nn.Module):
+    """Wavenet Model.
+    Citation: https://arxiv.org/pdf/1609.03499
+
+    TODO: V2 Unused, deprecated in future release
+    """
+
+    layer_dilations: Sequence[int]
+    layer_kernel_size: Sequence[int]
+    context_dim: int  # Number of output channels
+    latent_dim: int  # Number of input channels
+    expanded_dim: int
+    smoothing: int = (
+        1  # if >1, applies a square filter over the input marks over time to smooth fluctuation in input
+    )
+    categorical: bool = False  # if true , output is softmaxed
+    residual_model: bool = (
+        False  # if true, cumsum the final output. Wavenet is then learning residuals at each timestep
+    )
+    final_smooth: int = 0  # causal smoothing filter on final output
+
+    def setup(self):
+        self.tanh_layers = [
+            DilatedCausalConv1D(
+                features=self.expanded_dim,
+                kernel_size=self.layer_kernel_size[i],
+                dilation=self.layer_dilations[i],
+                use_bias=True,
+            )
+            for i in range(len(self.layer_dilations))
+        ]
+        self.gating_layers = [
+            DilatedCausalConv1D(
+                features=self.expanded_dim,
+                kernel_size=self.layer_kernel_size[i],
+                dilation=self.layer_dilations[i],
+                use_bias=True,
+            )
+            for i in range(len(self.layer_dilations))
+        ]
+        self.residual_layers = [
+            CausalConv1D(features=self.latent_dim, kernel_size=1, use_bias=False)
+            for _ in range(len(self.layer_dilations))
+        ]
+        self.skip_connections = [
+            CausalConv1D(features=self.latent_dim, kernel_size=1, use_bias=True)
+            for _ in range(len(self.layer_dilations))
+        ]
+
+        # self.initial_layer = CausalConv1D(
+        #     self.context_dim, kernel_size=1, use_bias=False
+        # )
+
+        self.post_sum = CausalConv1D(self.context_dim * 4, kernel_size=1, use_bias=True)
+        self.final_proj = CausalConv1D(self.context_dim, kernel_size=1, use_bias=False)
+
+    def __call__(self, x):
+        if self.smoothing > 1:
+            x = causal_smoothing(x, self.smoothing)
+        # x = self.initial_layer(x)  # expand from latent to context dimension
+        skip_connection = jnp.zeros(x.shape)
+        for tanh_layer, gating_layer, residual_layer, skip_layer in zip(
+            self.tanh_layers,
+            self.gating_layers,
+            self.residual_layers,
+            self.skip_connections,
+        ):
+            delta = jnp.tanh(tanh_layer(x)) * jax.nn.sigmoid(
+                gating_layer(x)
+            )  # Residual Gated activation units
+            skip_connection = skip_connection + skip_layer(delta)
+            delta = residual_layer(delta)
+            x = x + delta
+
+        if self.residual_model:
+            print("RESIDUAL", x.shape)
+            x = jnp.cumsum(skip_connection, axis=-2)  # cumsum over time
+
+        else:
+            skip_connection = nn.relu(skip_connection)
+            x = self.post_sum(skip_connection)
+            x = jax.nn.relu(x)
+            x = self.final_proj(x)
+        if self.categorical:
+            x = jax.nn.softmax(x, axis=-1)
+
+        if self.final_smooth > 1:
+            x = causal_smoothing(x, self.final_smooth)
+
+        return x
+
+    # class WavenetV2(nn.Module):
+    #     """Wavenet Model.
+    #     Citation: https://arxiv.org/pdf/1609.03499
+
+    #     Motivations:
+    #     - Now assume dim(Z) > dim(C)
+
+    #     Changes from V1:
+    #     - concatenate the skip connections instead of sum
+    #     - maintain latent dim rather than context dim through dilated conv layers
+    #     - remove the initial layer (since we are keeping the latent dim)
+
+    #     """
+
+    #     layer_dilations: Sequence[int]
+    #     layer_kernel_size: Sequence[int]
+    #     latent_dim: int  # Number of input channels
+    #     context_dim: int  # Number of output channels
+    #     expanded_dim: int
+    #     smoothing: int = (
+    #         1  # if >1, applies a square filter over the input marks over time to smooth fluctuation in input
+    #     )
+    #     categorical: bool = False  # if true , output is softmaxed
+    #     residual_model: bool = (
+    #         False  # if true, cumsum the final output. Wavenet is then learning residuals at each timestep
+    #     )
+    #     final_smooth: int = 0  # causal smoothing filter on final output
+
+    #     def setup(self):
+    #         self.tanh_layers = [
+    #             DilatedCausalConv1D(
+    #                 features=self.expanded_dim,
+    #                 kernel_size=self.layer_kernel_size[i],
+    #                 dilation=self.layer_dilations[i],
+    #                 use_bias=True,
+    #             )
+    #             for i in range(len(self.layer_dilations))
+    #         ]
+    #         self.gating_layers = [
+    #             DilatedCausalConv1D(
+    #                 features=self.expanded_dim,
+    #                 kernel_size=self.layer_kernel_size[i],
+    #                 dilation=self.layer_dilations[i],
+    #                 use_bias=True,
+    #             )
+    #             for i in range(len(self.layer_dilations))
+    #         ]
+    #         self.residual_layers = [
+    #             CausalConv1D(features=self.latent_dim, kernel_size=1, use_bias=False)
+    #             for _ in range(len(self.layer_dilations))
+    #         ]
+    #         self.skip_connections = [
+    #             CausalConv1D(features=self.context_dim, kernel_size=1, use_bias=True)
+    #             for _ in range(len(self.layer_dilations))
+    #         ]
+
+    #         # self.initial_layer = CausalConv1D(
+    #         #     self.context_dim, kernel_size=1, use_bias=False
+    #         # )
+
+    #         self.post_sum = CausalConv1D(self.context_dim * 4, kernel_size=1, use_bias=True)
+    #         self.final_proj = CausalConv1D(self.context_dim, kernel_size=1, use_bias=False)
+
+    #     def __call__(self, x):
+    #         if self.smoothing > 1:
+    #             x = causal_smoothing(x, self.smoothing)
+    #         # x = self.initial_layer(x)  # expand from latent to context dimension
+    #         skip_connection = []
+    #         for tanh_layer, gating_layer, residual_layer, skip_layer in zip(
+    #             self.tanh_layers,
+    #             self.gating_layers,
+    #             self.residual_layers,
+    #             self.skip_connections,
+    #         ):
+    #             delta = jnp.tanh(tanh_layer(x)) * jax.nn.sigmoid(
+    #                 gating_layer(x)
+    #             )  # Residual Gated activation units
+    #             skip_connection.append(skip_layer(delta))
+    #             delta = residual_layer(delta)
+    #             x = x + delta
+
+    #         if self.residual_model:
+    #             raise ValueError(
+    #                 "Poor performance on testing of residual model. Slated for removal"
+    #             )
+    #             print("RESIDUAL", x.shape)
+    #             x = jnp.cumsum(skip_connection, axis=-2)  # cumsum over time
+
+    #         else:
+    #             skip_connection = jnp.concatenate(skip_connection, axis=-1)
+    #             x = self.post_sum(skip_connection)
+    #             x = jax.nn.relu(x)
+    #             x = self.final_proj(x)
+    #         if self.categorical:
+    #             x = jax.nn.softmax(x, axis=-1)
+
+    #         if self.final_smooth > 1:
+    #             x = causal_smoothing(x, self.final_smooth)
+
+    #         return x
+
+
+"""
+CAUSAL TRANSFORMER
+"""
+
+def _split_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
+    B, T, D = x.shape
+    d_k = D // num_heads
+    return x.reshape(B, T, num_heads, d_k).transpose(0, 2, 1, 3)  # [B,H,T,d_k]
+
+
+def _merge_heads(x: jnp.ndarray) -> jnp.ndarray:
+    B, H, T, d_k = x.shape
+    return x.transpose(0, 2, 1, 3).reshape(B, T, H * d_k)  # [B,T,D]
+
+
+class FlashSelfAttention(nn.Module):
+    d_model: int
+    num_heads: int
+    dropout: float = 0.0
+    dtype: Any = jnp.float32  # parameter & output dtype
+    attn_dtype: Any = jnp.bfloat16
+
+    @nn.compact
+    def __call__(self, x, *, deterministic: bool):
+        # 1) project to QKV
+        qkv = nn.Dense(3 * self.d_model, use_bias=False, name="qkv")(x)
+        q, k, v = jnp.split(qkv, 3, axis=-1)
+
+        # # 2) split heads
+        # q = _split_heads(q, self.num_heads).astype(self.attn_dtype)
+        # k = _split_heads(k, self.num_heads).astype(self.attn_dtype)
+        # v = _split_heads(v, self.num_heads).astype(self.attn_dtype)
+
+        q = q.astype(self.attn_dtype)
+        k = k.astype(self.attn_dtype)
+        v = v.astype(self.attn_dtype)
+
+        # 3) flash attention kernel (cuDNN / Triton / Pallas)
+        attn_out = jax.nn.dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True,
+            # dropout=self.dropout if not deterministic else 0.0,
+            # deterministic=deterministic,
+            implementation="cudnn",  # ⇐ pick "pallas" / "flash_attention" if needed
+        )  # [B,H,T,d_k]
+        attn_out = attn_out.astype(self.dtype)
+
+        # # 4) merge heads & final projection
+        # attn_out = _merge_heads(attn_out).astype(self.dtype)
+        out = nn.Dense(self.d_model, use_bias=False, name="out_proj")(attn_out)
+        return out
+
+
+class FlashTransformerBlock(nn.Module):
+    d_model: int
+    num_heads: int
+    mlp_dim: int
+    dropout: float = 0.0
+
+    @nn.compact
+    def __call__(self, x, mask, deterministic: bool):
+        # --- Flash Attention path -------------------------------------------------
+        h = nn.LayerNorm(name="ln1")(x)
+        h = FlashSelfAttention(
+            d_model=self.d_model,
+            num_heads=self.num_heads,
+            dropout=self.dropout,
+            name="flash_attn",
+        )(h, deterministic=deterministic)
+        x = x + h  # residual‑1
+
+        # --- Feed‑forward ---------------------------------------------------------
+        h = nn.LayerNorm(name="ln2")(x)
+        h = nn.Dense(self.mlp_dim, name="fc1")(h)
+        h = nn.gelu(h)
+        h = nn.Dropout(rate=self.dropout)(h, deterministic=deterministic)
+        h = nn.Dense(self.d_model, name="fc2")(h)
+        x = x + h  # residual‑2
+        return x
+
+
+class _TransformerBlock(nn.Module):
+    d_model: int
+    num_heads: int
+    mlp_dim: int
+    dropout: float = 0.0
+
+    @nn.compact
+    def __call__(self, x, mask, *, deterministic: bool):
+        h = nn.LayerNorm()(x)
+        h = nn.SelfAttention(
+            num_heads=self.num_heads,
+            dropout_rate=self.dropout,
+            deterministic=deterministic,
+        )(h, mask=mask)
+        x = x + h  # residual 1
+
+        h = nn.LayerNorm()(x)
+        h = nn.Dense(self.mlp_dim)(h)
+        h = nn.gelu(h)
+        h = nn.Dropout(self.dropout)(h, deterministic=deterministic)
+        h = nn.Dense(self.d_model)(h)
+        x = x + h  # residual 2
+        return x
+
+
+class CausalTransformer(nn.Module):
+    """Causal‑masked Transformer for context inference."""
+
+    num_layers: int
+    num_heads: int
+    d_model: int
+    mlp_dim: int
+    context_dim: int
+    max_len: int = 2048
+    dropout: float = 0.0
+    final_smooth: int = 0  # optional causal smoothing of output
+    categorical: bool = False  # softmax on channel axis if True
+
+    def setup(self):
+        # project latent marks to model dimension
+        self.in_proj = nn.Dense(self.d_model, use_bias=False)
+        # learnable absolute positional embeddings
+        self.pos_embed = self.param(
+            "pos_embed",
+            nn.initializers.normal(stddev=0.02),
+            (self.max_len, self.d_model),
+        )
+        self.blocks = [
+            FlashTransformerBlock(
+                d_model=self.d_model,
+                num_heads=self.num_heads,
+                mlp_dim=self.mlp_dim,
+                dropout=self.dropout,
+            )
+            for _ in range(self.num_layers)
+        ]
+        self.out_proj = nn.Dense(self.context_dim, use_bias=False)
+
+    def __call__(self, z, *, deterministic: bool = True):
+        """
+        Args
+        ----
+        z : float32[batch, time, latent_dim]
+            Input mark sequence.
+        Returns
+        -------
+        c : float32[batch, time, context_dim]
+            Causal context embedding at every time‑step.
+        """
+        x = self.in_proj(z)
+        seq_len = x.shape[1]
+        # add / slice positional embeddings
+        x = x + self.pos_embed[:seq_len]
+
+        # build causal attention mask once
+        mask = nn.make_causal_mask(jnp.ones((seq_len,)), dtype=x.dtype)
+
+        for blk in self.blocks:
+            x = blk(x, mask, deterministic=deterministic)
+
+        c = self.out_proj(x)
+        if self.categorical:
+            c = nn.softmax(c, axis=-1)
+        if self.final_smooth > 1:
+            c = causal_smoothing(c, self.final_smooth)
+        return c
+
+
+class SamsTransformerBlock(nn.Module):
+    qkv_dim: int
+    num_heads: int
+    mlp_dim: int
+    attention_dropout_rate: float = 0.0
+    dropout_rate: float = 0.0
+    deterministic: bool = True
+
+    @staticmethod
+    def flash_attention(q, k, v, **kwargs):
+        q = q.astype(jnp.bfloat16)
+        k = k.astype(jnp.bfloat16)
+        v = v.astype(jnp.bfloat16)
+        return jax.nn.dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=True,
+            implementation="cudnn",  # ⇐ pick "pallas" / "flash_attention" if needed
+            # module=module,
+        ).astype(jnp.float32)
+
+    @nn.compact
+    def __call__(self, inputs, deterministic):
+        """Applies Encoder1DBlock module.
+
+        Args:
+        inputs: input data.
+        deterministic: if true dropout is applied otherwise not.
+
+        Returns:
+        output after transformer encoder block.
+        """
+        # Attention block.
+        assert inputs.ndim == 3
+        x = nn.LayerNorm()(inputs)
+
+        x = nn.MultiHeadDotProductAttention(
+            num_heads=self.num_heads,
+            # dtype=config.dtype,
+            qkv_features=self.qkv_dim,
+            # kernel_init=config.kernel_init,
+            # bias_init=config.bias_init,
+            use_bias=False,
+            broadcast_dropout=False,
+            dropout_rate=self.attention_dropout_rate,
+            deterministic=deterministic,
+            attention_fn=self.flash_attention,
+        )(x)
+
+        x = nn.Dropout(rate=self.dropout_rate)(x, deterministic=deterministic)
+        x = x + inputs
+
+        # MLP block.
+        y = nn.LayerNorm()(x)
+        y = nn.Dense(
+            self.mlp_dim,
+        )(y)
+        y = nn.elu(y)
+        y = nn.Dense(
+            x.shape[-1],
+        )(y)
+        return x + y
+
+
+class SamsCausalTransformer(nn.Module):
+    """Causal‑masked Transformer for context inference."""
+
+    num_layers: int
+    num_heads: int
+    d_model: int
+    mlp_dim: int
+    context_dim: int
+    dropout: float = 0.0
+    final_smooth: int = 0  # optional causal smoothing of output
+    categorical: bool = False  # softmax on channel axis if True
+    positional_periods: Sequence[float] = None  # Frequencies for positional encoding
+    attention_dropout_rate: float = 0.0
+
+    def setup(self):
+        # project latent marks to model dimension
+        # self.in_proj = nn.Dense(self.d_model, use_bias=False)
+        # learnable absolute positional embeddings
+
+        self.out_proj = nn.Dense(self.context_dim, use_bias=False)
+
+        self.blocks = [
+            SamsTransformerBlock(
+                qkv_dim=self.d_model * self.num_heads,
+                num_heads=self.num_heads,
+                attention_dropout_rate=self.attention_dropout_rate,
+                dropout_rate=self.dropout,
+                mlp_dim=self.mlp_dim,
+            )
+            for _ in range(self.num_layers)
+        ]
+
+        self.default_positional_periods = [
+            8,
+            16,
+            32,
+            64,
+            128,
+            256,
+            512,
+            1024,
+            2048,
+            4096,
+        ]
+
+    def _make_positional_embedding(self, delta_t) -> jnp.ndarray:
+
+        t = jnp.cumsum(delta_t, axis=1)
+        t = jnp.expand_dims(t, axis=-1)
+        sin_embedding = [
+            jnp.sin(t / period / (2 * jnp.pi))
+            for period in (self.positional_periods or self.default_positional_periods)
+        ]
+        sin_embedding = jnp.concatenate(sin_embedding, axis=-1)
+        cos_embedding = [
+            jnp.cos(t / period / (2 * jnp.pi))
+            for period in (self.positional_periods or self.default_positional_periods)
+        ]
+        cos_embedding = jnp.concatenate(cos_embedding, axis=-1)
+        embedding = jnp.concatenate([sin_embedding, cos_embedding], axis=-1)
+        return embedding
+
+    def __call__(self, z, *, deterministic: bool = True):
+        """
+        Args
+        ----
+        z : float32[batch, time, latent_dim]
+            Input mark sequence.
+        Returns
+        -------
+        c : float32[batch, time, context_dim]
+            Causal context embedding at every time‑step.
+        """
+        # add / slice positional embeddings
+        pos_embedding = self._make_positional_embedding(z[..., -1])
+        x = jnp.concatenate([z, pos_embedding], axis=-1)
+
+        # apply transformer layers
+        for blk in self.blocks:
+            x = blk(x, deterministic=deterministic)
+
+        c = self.out_proj(x)
+        if self.categorical:
+            c = nn.softmax(c, axis=-1)
+        if self.final_smooth > 1:
+            c = causal_smoothing(c, self.final_smooth)
+        return c

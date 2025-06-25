@@ -17,6 +17,13 @@ def rate_prediction_factory(
             n_params=n_params,
             **kwargs,
         )
+    if rate_model == "bilinearGlobal":
+        return BilinearGlobalRatePrediction(
+            context_dim=context_dim,
+            latent_dim=latent_dim,
+            n_params=n_params,
+            **kwargs,
+        )
     elif rate_model == "denseBilinear":
         return DenseBilinearRatePrediction(
             context_dim=context_dim,
@@ -33,9 +40,39 @@ def rate_prediction_factory(
             n_params=n_params,
             **kwargs,
         )
+    elif rate_model == "sharedSpace":
+        return SharedSpaceRatePrediction(
+            context_dim=context_dim,
+            latent_dim=latent_dim,
+            n_params=n_params,
+            **kwargs,
+        )
 
     else:
         raise ValueError(f"Unknown rate model: {rate_model}")
+
+
+class SharedSpaceRatePrediction(nn.Module):
+    """Fast model for rate prediction when the context and latent space are same
+    dimensions. Rate takern as dot product of two. Used in rapid training architecture
+    """
+
+    context_dim: int  # The dimension of the context vector
+    latent_dim: int  # The dimension of the latent vector
+    n_params: int  # The number of parameters in the distribution model
+
+    @nn.compact
+    def __call__(self, z, c):
+        if not self.context_dim == self.latent_dim:
+            raise ValueError(
+                "SharedSpaceRatePrediction requires context_dim to be equal to latent_dim"
+            )
+        if not self.n_params == 1:
+            raise ValueError(
+                "SharedSpaceRatePrediction requires n_params to be 1, but got {self.n_params}"
+            )
+
+        return jnp.sum(z * c, axis=-1, keepdims=True)
 
 
 class BilinearRatePrediction(nn.Module):
@@ -58,7 +95,6 @@ class BilinearRatePrediction(nn.Module):
             self.param(f"b_{i}", nn.initializers.zeros, (1,))
             for i in range(self.n_params)
         ]
-
         # Perform the operation z^T W c + b for each parameter
         return jnp.concat(
             [
@@ -71,6 +107,53 @@ class BilinearRatePrediction(nn.Module):
     @staticmethod
     def bilinear(W, b, z, c):
         return jnp.dot(z, jnp.dot(W, c)) + b
+
+
+class BilinearGlobalRatePrediction(nn.Module):
+    context_dim: int  # The dimension of the context vector
+    latent_dim: int  # The dimension of the latent vector
+    n_params: int  # The number of parameters in the distribution model
+
+    @nn.compact
+    def __call__(self, z, c):
+        # Initialize a trainable matrix W with shape (latent_dim, context_dim)
+        W = [
+            self.param(
+                f"W_{i}",
+                nn.initializers.lecun_normal(),
+                (self.latent_dim, self.context_dim - 1),
+            )
+            for i in range(self.n_params)
+        ]
+        b = [
+            self.param(f"b_{i}", nn.initializers.zeros, (1,))
+            for i in range(self.n_params)
+        ]
+
+        r_global = [
+            self.param(
+                f"r_global_{i}",
+                nn.initializers.lecun_normal(),
+                (1, 1),
+            )
+            for i in range(self.n_params)
+        ]
+
+        # Perform the operation z^T W c + b for each parameter
+        return jnp.concat(
+            [
+                jax.vmap(Partial(self.bilinear, W_i, b_i, r_i))(z, c)
+                for W_i, b_i, r_i in zip(W, b, r_global)
+            ],
+            axis=-1,
+        )
+
+    @staticmethod
+    def bilinear(W, b, r, z, c):
+        print("R", r.shape)
+        print("C", c.shape)
+        print((r * c[..., -1]).shape)
+        return jnp.dot(z, jnp.dot(W, c[:-1])) + (r[0] * c[-1]) + b
 
 
 class DenseBilinearRatePrediction(nn.Module):

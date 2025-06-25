@@ -38,7 +38,7 @@ class PoissonProcess(ProcessModel):
 
     n_params = 1
 
-    def log_hazard(self, t, log_rate):
+    def log_hazard(self, t, log_rate, sum=False):
         return log_rate[..., 0]
 
     def log_survival(self, t, log_rate):
