@@ -227,5 +227,4 @@ class DenseRatePrediction(nn.Module):
         log_r = MLP(
             self.widths + (self.n_params,), kernel_init=nn.initializers.he_uniform()
         )(q)
-        # return jnp.squeeze(jnp.clip(jnp.exp(log_r), min=1e-8, max=1e3))
-        return jnp.squeeze(log_r)
+        return jnp.squeeze(log_r)[..., None]  # Return as a column vector
