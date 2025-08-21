@@ -90,7 +90,7 @@ class C3poAnalysis:
         def embed_chunk(x, delta_t):
             return Embedding(
                 self.encoder_args, self.context_args, self.latent_dim, self.context_dim
-            ).apply(self.embedding_params, x, delta_t)
+            ).apply(self.embedding_params, x, delta_t, jax.random.PRNGKey(0))
 
         i = chunk_padding
 
@@ -171,7 +171,7 @@ class C3poAnalysis:
     def embed_context_pca(self):
         if self.pca is None:
             raise ValueError("pca must first be fit to data")
-
+        self.c_pca_interp = None
         if self.c_pca is None:
             self.c_pca = np.ones_like(self.c) * np.nan
             ind_valid = (~np.isnan(self.c)).any(axis=1)
