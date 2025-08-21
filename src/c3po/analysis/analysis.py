@@ -1,11 +1,48 @@
 import numpy as np
-from spyglass.common import interval_list_contains_ind
 from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 import jax
 
 from ..model.model import Embedding
+
+
+def interval_list_contains_ind(interval_list, timestamps):
+    """Find indices of list of timestamps contained in an interval list.
+
+    Parameters
+    ----------
+    interval_list : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    timestamps : array_like
+    """
+    ind = []
+    for interval in interval_list:
+        ind += np.ravel(
+            np.argwhere(
+                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
+            )
+        ).tolist()
+    return np.asarray(ind)
+
+
+def interval_list_contains(interval_list, timestamps):
+    """Find timestamps that are contained in an interval list.
+
+    Parameters
+    ----------
+    interval_list : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    timestamps : array_like
+    """
+    ind = []
+    for interval in interval_list:
+        ind += np.ravel(
+            np.argwhere(
+                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
+            )
+        ).tolist()
+    return timestamps[ind]
 
 
 class C3poAnalysis:
