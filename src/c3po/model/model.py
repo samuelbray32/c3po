@@ -46,10 +46,16 @@ class Embedding(nn.Module):
         else:
             self.convolutional_layers = []
 
-    def __call__(self, x, delta_t):
+    def __call__(self, x, delta_t, rand_key=None):
         # attach delta_t to z to be used in context model
-        z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
+        if self.encoder.requires_random_key:
+            if rand_key is None:
+                raise ValueError("Random key is required for this encoder.")
+            z = jax.vmap(self.encoder, in_axes=(1, None), out_axes=1)(x, rand_key)
+        else:
+            z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
         z_aug = jnp.concatenate([z, jnp.log(delta_t[..., None])], axis=-1)
+
         # generate context
         if self.rnn_context:
             # context is a RNN
@@ -76,6 +82,10 @@ class Embedding(nn.Module):
             z,
             c,
         )  # z = (n_batch, n_marks, latent_dim), c = (n_batch, n_marks, context_dim)
+
+    @property
+    def requires_random_key(self):
+        return self.encoder.requires_random_key
 
 
 class C3PO(nn.Module):
@@ -140,9 +150,12 @@ class C3PO(nn.Module):
 
     def __call__(self, x, delta_t, rand_key):
         # Embed the marks and get the context
-        z, c = self.embedding(
-            x, delta_t
-        )  # z = (n_marks, latent_dim), c = (n_marks, context_dim)
+        if self.embedding.requires_random_key:
+            z, c = self.embedding(x, delta_t, rand_key)
+        else:
+            z, c = self.embedding(
+                x, delta_t
+            )  # z = (n_marks, latent_dim), c = (n_marks, context_dim)
         neg_z = get_neg_samples_batch(
             z, self.n_neg_samples, rand_key
         )  # (n_marks, n_neg_samples, latent_dim)
