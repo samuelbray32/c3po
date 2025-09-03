@@ -46,10 +46,16 @@ class Embedding(nn.Module):
         else:
             self.convolutional_layers = []
 
-    def __call__(self, x, delta_t):
+    def __call__(self, x, delta_t, rand_key=None):
         # attach delta_t to z to be used in context model
-        z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
+        if self.encoder.requires_random_key:
+            if rand_key is None:
+                raise ValueError("Random key is required for this encoder.")
+            z = jax.vmap(self.encoder, in_axes=(1, None), out_axes=1)(x, rand_key)
+        else:
+            z = jax.vmap(self.encoder, in_axes=(1), out_axes=1)(x)
         z_aug = jnp.concatenate([z, jnp.log(delta_t[..., None])], axis=-1)
+
         # generate context
         if self.rnn_context:
             # context is a RNN
@@ -76,6 +82,10 @@ class Embedding(nn.Module):
             z,
             c,
         )  # z = (n_batch, n_marks, latent_dim), c = (n_batch, n_marks, context_dim)
+
+    @property
+    def requires_random_key(self):
+        return self.encoder.requires_random_key
 
 
 class C3PO(nn.Module):
@@ -140,9 +150,12 @@ class C3PO(nn.Module):
 
     def __call__(self, x, delta_t, rand_key):
         # Embed the marks and get the context
-        z, c = self.embedding(
-            x, delta_t
-        )  # z = (n_marks, latent_dim), c = (n_marks, context_dim)
+        if self.embedding.requires_random_key:
+            z, c = self.embedding(x, delta_t, rand_key)
+        else:
+            z, c = self.embedding(
+                x, delta_t
+            )  # z = (n_marks, latent_dim), c = (n_marks, context_dim)
         neg_z = get_neg_samples_batch(
             z, self.n_neg_samples, rand_key
         )  # (n_marks, n_neg_samples, latent_dim)
@@ -202,8 +215,7 @@ class C3PO(nn.Module):
     def embed(self, x, delta_t):
         return self.embedding(x, delta_t)
 
-    # @jax.jit
-    def loss_generalized_model(
+    def mle_loss(
         self,
         pos_parameters,
         neg_parameters,
@@ -213,7 +225,9 @@ class C3PO(nn.Module):
         rand_key=None,
         prior_params=None,
     ):
-        """C3PO loss function for length n_predict and generic process.
+        """Maximum likelihood loss function for length n_predict and generic process.
+        L = log(Hazard_pos) + log SUM_samples(Survival)
+
         Parameters:
         pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
         neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
@@ -242,7 +256,7 @@ class C3PO(nn.Module):
         cum_delta_t = jnp.cumsum(delta_t_stacked, axis=1)
 
         # sample parameters if needed
-        if self.sample_params is "gaussian":
+        if self.sample_params == "gaussian":
             n_sigma = pos_parameters.shape[-1] // 2
             sigma_regularization = jnp.mean(
                 jnp.log1p(jnp.exp(pos_parameters[..., n_sigma:]))
@@ -296,13 +310,34 @@ class C3PO(nn.Module):
             + jnp.sum(pos_survival_term, axis=1)[..., ::sample_step]
         )  # TODO: scale neg samples ?
 
-        if self.sample_params is "gaussian":
+        if self.sample_params == "gaussian":
             # add the log probability of the samples
             neg_log_p += (jnp.sum(kl_div_pos) + jnp.sum(kl_div_neg)) * 10.0
 
         return jnp.mean(neg_log_p)
 
-    def contrastive_sequence_loss(
+    def loss(self, pos_parameters, neg_parameters, delta_t, z, neg_z):
+        """C3PO loss function for length n_predict and generic process.
+        Parameters:
+        pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
+        neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
+        delta_t: jnp.array of shape (batch_size, n_timepoints)
+        rand_key: jnp.array, optional
+            The random key to use for sampling. The default is None.
+
+        Returns:
+            jnp.array: the loss value
+        """
+        return self.contrastive_loss(
+            self,
+            pos_parameters,
+            neg_parameters,
+            delta_t,
+            z,
+            neg_z,
+        )
+
+    def contrastive_loss(
         self,
         pos_parameters,
         neg_parameters,
@@ -311,6 +346,10 @@ class C3PO(nn.Module):
         neg_z,
     ):
         """C3PO loss function for length n_predict and generic process.
+        L = log[ (H_pos / H'_pos) / SUM_samples(H_i/H'_i) ]
+        Where H is the learned hazard function and H' is the hazard function of the alternative (noise) model.
+        (see docs for derivation)
+
         Parameters:
         pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
         neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
@@ -349,6 +388,7 @@ class C3PO(nn.Module):
         )
 
         def log_noise_hazard(z):
+            # alternative model
             # V1: assume intensity of noise falls off with L2 norm
             return -1 * jnp.sum(z**2, axis=-1)  # Gaussian hazard
 
@@ -360,29 +400,11 @@ class C3PO(nn.Module):
             [neg_log_noise_hazard_term, pos_log_noise_hazard_term[:, None, :]], axis=1
         )
 
-        # neg_term = logsumexp(neg_log_hazard_term - neg_log_noise_hazard_term, axis=1)
         neg_term = chunked_logsumexp(
             neg_log_hazard_term - neg_log_noise_hazard_term, axis=1, chunk_size=8
         )
         loss = -pos_log_hazard_term + pos_log_noise_hazard_term + neg_term
         return jnp.mean(loss)
-
-    # def noise_hazard(self, z):
-    #     # V1: assume intensity of noise falls off with distance
-    #     return ((2 * 3.14) ** (self.latent_dim / 2)) * jnp.exp(
-    #         -jnp.dot(
-    #             z,
-    #             z,
-    #         )
-    #         / 2
-    #     )  # Gaussian hazard
-
-    # def log_noise_hazard(self, z):
-    #     # V1: assume intensity of noise falls off with distance
-    #     return (self.latent_dim / 2) * jnp.log(2 * 3.14) - jnp.dot(
-    #         z,
-    #         z,
-    #     ) / 2  # Gaussian hazard
 
     @staticmethod
     def gauss_sample(key, params):

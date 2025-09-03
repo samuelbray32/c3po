@@ -1,20 +1,65 @@
 import numpy as np
-from spyglass.common import interval_list_contains_ind
 from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 import jax
 
-from ..model.model import Embedding
+from ..model.model import Embedding, C3PO
+
+from flax import serialization
+
+
+def interval_list_contains_ind(interval_list, timestamps):
+    """Find indices of list of timestamps contained in an interval list.
+
+    Parameters
+    ----------
+    interval_list : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    timestamps : array_like
+    """
+    ind = []
+    for interval in interval_list:
+        ind += np.ravel(
+            np.argwhere(
+                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
+            )
+        ).tolist()
+    return np.asarray(ind)
+
+
+def interval_list_contains(interval_list, timestamps):
+    """Find timestamps that are contained in an interval list.
+
+    Parameters
+    ----------
+    interval_list : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    timestamps : array_like
+    """
+    ind = []
+    for interval in interval_list:
+        ind += np.ravel(
+            np.argwhere(
+                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
+            )
+        ).tolist()
+    return timestamps[ind]
 
 
 class C3poAnalysis:
-    def __init__(
-        self,
-        model,
-        model_args,
-        params,
-    ):
+    def __init__(self, model=None, model_args=None, params=None, init_key=None):
+        if init_key:
+            if not all([val is None for val in [model, model_args, params]]):
+                raise ValueError(
+                    "If init_key is provided, model, model_args, and params must be null value."
+                )
+            model, model_args, params = self.initialize_from_table_entry(init_key)
+        elif not all([val is not None for val in [model, model_args, params]]):
+            raise ValueError(
+                "If init_key is not provided, model, model_args, and params must be provided."
+            )
+
         self.model = model
         self.model_args = model_args  # arguments to generate the model
         self.params = params  # parameters of the model (currently assume trained)
@@ -29,6 +74,36 @@ class C3poAnalysis:
 
         self.latent_dim = model_args["latent_dim"]
         self.context_dim = model_args["context_dim"]
+
+    def initialize_from_table_entry(self, init_key):
+        from ..tables.dev_tables import C3POStorage
+
+        entry = (C3POStorage & init_key).fetch1()
+        model_args = dict(
+            encoder_args=entry["encoder_args"],
+            context_args=entry["context_args"],
+            rate_args=entry["rate_args"],
+            distribution=entry.get("distribution", "poisson"),
+            latent_dim=entry["latent_dim"],
+            context_dim=entry["context_dim"],
+            n_neg_samples=1,
+            predicted_sequence_length=1,
+            sample_params=None,
+        )
+
+        model = C3PO(**model_args)
+
+        x_ = np.zeros((1, 100, entry["input_shape"]))
+        delta_t_ = np.zeros(
+            (
+                1,
+                100,
+            )
+        )
+        rand_key = jax.random.PRNGKey(0)
+        null_params = model.init(jax.random.PRNGKey(1), x_, delta_t_, rand_key)
+        params = serialization.from_bytes(null_params, entry["learned_params"])
+        return model, model_args, params
 
     @property
     def encoder_args(self):
@@ -90,7 +165,7 @@ class C3poAnalysis:
         def embed_chunk(x, delta_t):
             return Embedding(
                 self.encoder_args, self.context_args, self.latent_dim, self.context_dim
-            ).apply(self.embedding_params, x, delta_t)
+            ).apply(self.embedding_params, x, delta_t, jax.random.PRNGKey(0))
 
         i = chunk_padding
 
@@ -171,7 +246,7 @@ class C3poAnalysis:
     def embed_context_pca(self):
         if self.pca is None:
             raise ValueError("pca must first be fit to data")
-
+        self.c_pca_interp = None
         if self.c_pca is None:
             self.c_pca = np.ones_like(self.c) * np.nan
             ind_valid = (~np.isnan(self.c)).any(axis=1)
@@ -419,6 +494,30 @@ class C3poAnalysis:
         self._check_embedded_data()
         if any(val is None for val in [self.t_interp, self.c_interp]):
             raise ValueError("Data not interpolated yet")
+
+    def save_embedding(self, file_path: str):
+        """
+        Save the embedded data to a file.
+
+        Args:
+            file_path (str): Path to the file where the data will be saved.
+        """
+        if self.z is None or self.c is None or self.t is None:
+            raise ValueError("Data not embedded yet")
+
+        np.savez(file_path, z=self.z, c=self.c, t=self.t)
+
+    def load_embedding(self, file_path: str):
+        """
+        Load the embedded data from a file.
+
+        Args:
+            file_path (str): Path to the file from which the data will be loaded.
+        """
+        data = np.load(file_path)
+        self.z = data["z"]
+        self.c = data["c"]
+        self.t = data["t"]
 
 
 def bootstrap_traces(

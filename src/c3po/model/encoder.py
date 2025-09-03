@@ -15,6 +15,11 @@ class BaseEncoder(nn.Module):
     def __call__(self, x):
         raise NotImplementedError
 
+    @property
+    def requires_random_key(self):
+        """Indicates whether the encoder requires a random key for its operations."""
+        return False
+
 
 def encoder_factory(encoder_model: str, latent_dim: int, **kwargs) -> BaseEncoder:
     if encoder_model == "simple":
@@ -27,6 +32,8 @@ def encoder_factory(encoder_model: str, latent_dim: int, **kwargs) -> BaseEncode
         return MultiShankEncoderV1(latent_dim=latent_dim, **kwargs)
     if encoder_model == "sorted_spikes":
         return SortedSpikesEncoder(latent_dim=latent_dim, **kwargs)
+    if encoder_model == "identity":
+        return IdentityEncoder(latent_dim=latent_dim, **kwargs)
     else:
         raise ValueError(f"Unknown encoder model: {encoder_model}")
 
@@ -186,13 +193,38 @@ class SortedSpikesEncoder(BaseEncoder):
     """
 
     n_units: int
+    gauss_noise_std: float = 0.0
 
     def setup(self):
         self.m = self.param(
             "encoder_matrix",
-            nn.initializers.he_uniform(),
+            # nn.initializers.he_uniform(),
+            nn.initializers.normal(stddev=0.1),
             (self.n_units, self.latent_dim),
         )
 
+    def __call__(self, x, rand_key=None):
+        if not self.requires_random_key:
+            return jnp.dot(x, self.m)
+        return jax.random.normal(rand_key, (x.shape[0], self.latent_dim)) + jnp.dot(
+            x, self.m
+        )
+
+    @property
+    def requires_random_key(self):
+        """Indicates whether the encoder requires a random key for its operations."""
+        return self.gauss_noise_std > 0
+
+
+class IdentityEncoder(BaseEncoder):
+
+    def setup(self):
+        return
+
     def __call__(self, x):
-        return jnp.dot(x, self.m)
+        if x.shape[-1] != self.latent_dim:
+            raise ValueError(
+                f"Input shape {x.shape} does not match latent_dim {self.latent_dim}"
+            )
+        # Simply return the input as is
+        return jnp.array(x)
