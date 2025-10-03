@@ -158,8 +158,8 @@ class C3poAnalysis:
             self.pca_intervals = None
             self.c_pca_interp = None
 
-        z = np.zeros((x.shape[1], self.latent_dim))
-        c = np.zeros((x.shape[1], self.context_dim))
+        z = np.zeros((x.shape[1], self.latent_dim)) * np.nan
+        c = np.zeros((x.shape[1], self.context_dim)) * np.nan
 
         @jax.jit
         def embed_chunk(x, delta_t):
@@ -237,8 +237,10 @@ class C3poAnalysis:
             fit_intervals = np.array([[self.t[0], self.t[-1]]])
 
         fit_ind = interval_list_contains_ind(fit_intervals, self.t)
+        data = self.c[fit_ind]
+        data = data[~np.isnan(data).any(axis=1)]
         pca = PCA(n_components=self.context_dim)
-        pca.fit(self.c[fit_ind])
+        pca.fit(data)
         self.pca = pca
         self.pca_intervals = fit_intervals
         self.embed_context_pca()
