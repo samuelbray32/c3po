@@ -194,6 +194,7 @@ class SortedSpikesEncoder(BaseEncoder):
 
     n_units: int
     gauss_noise_std: float = 0.0
+    input_format: str = "one_hot"  # or "indices"
 
     def setup(self):
         self.m = self.param(
@@ -204,11 +205,18 @@ class SortedSpikesEncoder(BaseEncoder):
         )
 
     def __call__(self, x, rand_key=None):
+        if self.input_format == "one_hot":
+            if x.shape[-1] != self.n_units:
+                raise ValueError(
+                    f"Input shape {x.shape} does not match n_units {self.n_units}"
+                )
+            projection = jnp.dot(x, self.m)
+        elif self.input_format == "indices":
+            projection = self.m[x][:, 0, :]  # x is of shape (batch_size, 1)
+
         if not self.requires_random_key:
-            return jnp.dot(x, self.m)
-        return jax.random.normal(rand_key, (x.shape[0], self.latent_dim)) + jnp.dot(
-            x, self.m
-        )
+            return projection
+        return jax.random.normal(rand_key, (x.shape[0], self.latent_dim)) + projection
 
     @property
     def requires_random_key(self):
