@@ -489,7 +489,8 @@ class C3poAnalysis:
             response = c_data[response_ind_array, :].reshape(
                 (len(mark_inds), window[1] - window[0], c_data.shape[1])
             )
-        return response
+        max_vals = np.max(response, axis=1).max(axis=1)
+        return response[~np.isnan(max_vals)]
 
     def _check_embedded_data(self):
         if any(val is None for val in [self.z, self.c, self.t]):
