@@ -94,6 +94,9 @@ class C3poAnalysis:
         model = C3PO(**model_args)
 
         x_ = np.zeros((1, 100, entry["input_shape"]))
+        if entry["encoder_args"].get("input_format", None) == "indices":
+            x_ = x_.astype(np.int16)
+
         delta_t_ = np.zeros(
             (
                 1,

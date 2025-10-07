@@ -213,6 +213,10 @@ class SortedSpikesEncoder(BaseEncoder):
             projection = jnp.dot(x, self.m)
         elif self.input_format == "indices":
             projection = self.m[x][:, 0, :]  # x is of shape (batch_size, 1)
+        else:
+            raise ValueError(
+                f"Unknown input_format {self.input_format}. Use 'one_hot' or 'indices'"
+            )
 
         if not self.requires_random_key:
             return projection
