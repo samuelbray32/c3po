@@ -75,6 +75,9 @@ class C3poAnalysis:
         self.latent_dim = model_args["latent_dim"]
         self.context_dim = model_args["context_dim"]
 
+        self.decoder_model = None
+        self.decode_pca = None
+
     def initialize_from_table_entry(self, init_key):
         from ..tables.dev_tables import C3POStorage
 
@@ -492,6 +495,169 @@ class C3poAnalysis:
         max_vals = np.max(response, axis=1).max(axis=1)
         return response[~np.isnan(max_vals)]
 
+    # ----------------------------------------------------------------------------------
+    # Frequency analysis tools
+    def power_spectrum(self, intervals: np.ndarray = None, window_size=1000, pca=True):
+        """Compute the power spectrum of the context using welch's method
+
+        Parameters:
+        ----------
+            intervals (np.ndarray, optional): Time intervals to compute the power spectrum for. Defaults to None.
+            fs (float, optional): Sampling frequency. Defaults to 500.0.
+            pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
+
+        """
+        t, c = self._select_data(pca, interpolated=True)
+        ind_valid = (~np.isnan(c)).any(axis=1)
+        t = t[ind_valid]
+        c = c[ind_valid, :]
+
+        fs = np.mean(np.diff(t)) ** -1
+
+        if intervals is None:
+            intervals = np.array([[t[0], t[-1]]])
+
+        from scipy.signal import welch
+        from scipy.signal import windows
+
+        window_filt = windows.hamming(window_size, sym=True)
+        noverlap = window_size // 2
+
+        mid = []
+        lo = []
+        hi = []
+        for pc in range(c.shape[1]):
+            spectrums = []
+            weights = []
+            for i, interval in enumerate(intervals):
+                ind = np.where(np.logical_and(t >= interval[0], t <= interval[1]))[0]
+                if len(ind) < window_size:
+                    continue
+                c_i = c[ind, pc]
+
+                frequencies, P_i = welch(
+                    c_i,
+                    fs=fs,
+                    window=window_filt,
+                    noverlap=noverlap,
+                    scaling="density",
+                    nfft=10000,
+                )
+                weight_i = np.floor(len(c) - window_size / (window_size - noverlap)) + 1
+                spectrums.append(P_i)
+                weights.append(weight_i)
+            if len(spectrums) == 1:
+                mid.append(spectrums[0])
+                lo.append(spectrums[0])
+                hi.append(spectrums[0])
+                continue
+            results = weighted_quantile(
+                np.array(spectrums),
+                quantiles=[0.5, 0.25, 0.75],
+                sample_weight=np.array(weights),
+            )
+
+            mid.append(results[0])
+            lo.append(results[1])
+            hi.append(results[2])
+
+        return frequencies, np.array(mid), np.array(lo), np.array(hi)
+
+    # ----------------------------------------------------------------------------------
+    # decoder tools: Testing decodability of latent factors to known variables
+    import sklearn
+
+    def initialize_decoder(self, model_type="knn", **kwargs):
+        if isinstance(model_type, str):
+            if model_type == "knn":
+                from sklearn.neighbors import KNeighborsRegressor
+
+                self.decoder_model = KNeighborsRegressor(**kwargs)
+            elif model_type == "linear":
+                from sklearn.linear_model import LinearRegression
+
+                self.decoder_model = LinearRegression(**kwargs)
+
+            else:
+                raise ValueError(f"Unknown model type {model_type}")
+
+    def fit_decoder(
+        self,
+        feature_values,
+        feature_times,
+        intervals=None,
+        pca=True,
+        interpolate=False,
+        smooth_context: int = None,
+    ):
+        self._check_embedded_data()
+        t_data, c_data = self._select_data(pca, interpolate)
+        if smooth_context:
+            from scipy.ndimage import gaussian_filter1d
+
+            c_data = gaussian_filter1d(c_data, smooth_context, axis=0, mode="nearest")
+
+        if self.decoder_model is None:
+            raise ValueError("Decoder model not initialized")
+        if intervals is None:
+            intervals = np.array([[t_data[0], t_data[-1]]])
+
+        ind_valid = interval_list_contains_ind(intervals, feature_times)
+        feature_times = feature_times[ind_valid]
+        feature_values = feature_values[ind_valid]
+
+        ind = np.digitize(feature_times, t_data) - 1
+        ind_contained = np.logical_and(ind >= 0, ind < t_data.shape[0])
+        ind = ind[ind_contained]
+        feature_times = feature_times[ind_contained]
+        feature_values = feature_values[ind_contained]
+        c_data = c_data[ind]
+
+        ind = np.where(~np.isnan(c_data).any(axis=1))[0]
+        c_data = c_data[ind]
+        feature_times = feature_times[ind]
+        feature_values = feature_values[ind]
+
+        # feature_times = feature_times[np.logical_and(ind >= 0, ind < t_data.shape[0])]
+        # feature_values = feature_values[np.logical_and(ind >= 0, ind < t_data.shape[0])]
+
+        # ind = ind[
+        #     np.logical_and(
+        #         ~np.isnan(c_data[ind]).any(axis=1),
+        #         ~np.isnan(feature_values).any(axis=1),
+        #     )
+        # ]
+        # feature_times = feature_times[
+        #     np.logical_and(
+        #         ~np.isnan(c_data[ind]).any(axis=1),
+        #         ~np.isnan(feature_values).any(axis=1),
+        #     )
+        # ]
+        # feature_values = feature_values[
+        #     np.logical_and(
+        #         ~np.isnan(c_data[ind]).any(axis=1),
+        #         ~np.isnan(feature_values).any(axis=1),
+        #     )
+        # ]
+
+        self.decoder_model.fit(c_data, feature_values)
+        self.decode_pca = pca
+
+    def predict_decoder(self, interval, interpolate=False):
+        self._check_embedded_data()
+        if self.decoder_model is None:
+            raise ValueError("Decoder model not initialized")
+        t_data, c_data = self._select_data(self.decode_pca, interpolated=interpolate)
+        ind = np.where(np.logical_and(t_data >= interval[0], t_data <= interval[1]))[0]
+        if len(ind) == 0:
+            return np.array([]), np.array([])
+        ind = ind[~np.isnan(c_data[ind]).any(axis=1)]
+        if len(ind) == 0:
+            return np.array([]), np.array([])
+        return t_data[ind], self.decoder_model.predict(c_data[ind])
+
+    # ----------------------------------------------------------------------------------
+    # Utilities
     def _check_embedded_data(self):
         if any(val is None for val in [self.z, self.c, self.t]):
             raise ValueError("Data not embedded yet")
@@ -501,6 +667,8 @@ class C3poAnalysis:
         if any(val is None for val in [self.t_interp, self.c_interp]):
             raise ValueError("Data not interpolated yet")
 
+    # ----------------------------------------------------------------------------------
+    # Save/load embedded data
     def save_embedding(self, file_path: str):
         """
         Save the embedded data to a file.
@@ -548,3 +716,73 @@ def bootstrap_traces(
         np.percentile(bootstrap, (100 - conf_interval) / 2, axis=0),
         np.percentile(bootstrap, conf_interval + (100 - conf_interval) / 2, axis=0),
     ]
+
+
+def weighted_quantile(
+    values,
+    quantiles,
+    sample_weight=None,
+):
+    """Very close to numpy.percentile, but supports weights.
+    NOTE: quantiles should be in [0, 1]!
+    :param values: numpy.array with data
+    :param quantiles: array-like with many quantiles needed
+    :param sample_weight: array-like of the same length as `array`
+    :param values_sorted: bool, if True, then will avoid sorting of
+        initial array
+    :param old_style: if True, will correct output to be consistent
+        with numpy.percentile.
+    :return: numpy.array with computed quantiles.
+    """
+    if values.ndim == 1:
+        return _weighted_quantile_single(
+            values,
+            quantiles,
+            sample_weight=sample_weight,
+        )
+    else:
+        return np.array(
+            [
+                _weighted_quantile_single(
+                    values[:, i],
+                    quantiles,
+                    sample_weight=sample_weight,
+                )
+                for i in range(values.shape[1])
+            ]
+        ).T
+
+
+def _weighted_quantile_single(
+    values,
+    quantiles,
+    sample_weight=None,
+):
+    """Very close to numpy.percentile, but supports weights.
+    NOTE: quantiles should be in [0, 1]!
+    :param values: numpy.array with data
+    :param quantiles: array-like with many quantiles needed
+    :param sample_weight: array-like of the same length as `array`
+    :param values_sorted: bool, if True, then will avoid sorting of
+        initial array
+    :param old_style: if True, will correct output to be consistent
+        with numpy.percentile.
+    :return: numpy.array with computed quantiles.
+    """
+    values = np.array(values)
+    quantiles = np.array(quantiles)
+    if sample_weight is None:
+        sample_weight = np.ones(len(values))
+    sample_weight = np.array(sample_weight)
+    assert np.all(quantiles >= 0) and np.all(
+        quantiles <= 1
+    ), "quantiles should be in [0, 1]"
+
+    sorter = np.argsort(values)
+    values = values[sorter]
+    sample_weight = sample_weight[sorter]
+
+    weighted_quantiles = np.cumsum(sample_weight) - 0.5 * sample_weight
+
+    weighted_quantiles /= np.sum(sample_weight)
+    return np.interp(quantiles, weighted_quantiles, values)
