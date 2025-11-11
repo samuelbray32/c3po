@@ -7,9 +7,12 @@ if os.environ.get("CUDA_VISIBLE_DEVICES", None) is None:
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
-from jax.scipy.special import logsumexp
+from flax.linen import Module
 from functools import partial
-from typing import Sequence
+import numpy as np
+import optax
+from typing import Sequence, Callable, Dict
+from tqdm import tqdm
 
 from .encoder import encoder_factory
 from .context import context_factory
@@ -174,7 +177,7 @@ class C3PO(nn.Module):
             ],
             axis=1,
         )  # (n_marks-predicted_sequence_length, predicted_sequence_length, latent_dim,
-        print("z_stacked", z_stacked.shape)
+        # print("z_stacked", z_stacked.shape)
 
         # predict the rate parameters for the the observed sequences
         # rates of sequences following time i (z_stacked[n_batch,i]) are predicted
@@ -188,9 +191,9 @@ class C3PO(nn.Module):
             z_stacked
         )  # (n_marks-predicted_sequence_length, predicted_sequence_length, n_params)
 
-        print("Z", z.shape, "pos_params", pos_params.shape)
-        print("neg_z", neg_z.shape)
-        print("c", c.shape)
+        # print("Z", z.shape, "pos_params", pos_params.shape)
+        # print("neg_z", neg_z.shape)
+        # print("c", c.shape)
         # predict the rate parameters for the negative samples
         neg_params = jax.vmap(
             lambda zi: vmap_params(zi, c[:, : -self.predicted_sequence_length]),
@@ -198,7 +201,7 @@ class C3PO(nn.Module):
             out_axes=1,
         )(neg_z[:, :, self.predicted_sequence_length :])
 
-        print("neg_params", neg_params.shape)
+        # print("neg_params", neg_params.shape)
 
         # cum_neg_rates = jnp.sum(neg_rates, axis=1)  # (n_marks)
 
@@ -449,10 +452,259 @@ def loss_sample(pos_rates, cum_neg_rates, delta_t):
     return jnp.mean(neg_log_p)
 
 
-@jax.jit
-def loss(pos_rates, cum_neg_rates, delta_t):
-    """C3PO loss function for length one sequence and poisson process."""
-    neg_log_p = -jnp.log(pos_rates) + 1 / 3 * delta_t[:, 1:] * (
-        cum_neg_rates + pos_rates
-    )  # (n_marks)
-    return jnp.mean(neg_log_p)
+# ----------------------------------------------------------------------------------
+# Training functions
+
+
+def _make_apply_fn(
+    model: Module,
+) -> Callable:
+    """Create a pure, reusable apply fn (no closure over model at jit-time)."""
+
+    def apply_fn(params: Dict, x, delta_t, rng):
+        # Forward pass only depends on params & arrays.
+        # If you need mutable collections, pass `mutable=...` here explicitly.
+        return model.apply(params, x, delta_t, rng)
+
+    return apply_fn
+
+
+def _make_loss_fn(
+    model: Module,
+    loss_type: str = "contrastive",
+) -> Callable:
+    """Return a jittable loss that does not close over changing Python objects."""
+    apply_fn = _make_apply_fn(model)
+
+    def loss_fn(params, x, delta_t, rng):
+        pos_params, neg_params, z, _c, neg_z = apply_fn(params, x, delta_t, rng)
+        if loss_type == "contrastive":
+            # Keep this pure and array-driven; no Python branching on data.
+            return model.contrastive_loss(
+                pos_params,
+                neg_params,
+                delta_t,
+                z[:, model.predicted_sequence_length :],
+                neg_z,
+            )
+        elif loss_type == "mle":
+            return model.mle_loss(pos_params, neg_params, delta_t, rand_key=rng)
+        else:
+            raise ValueError("Unknown loss_type")
+
+    return loss_fn
+
+
+def train_model(
+    model,
+    params,
+    x_train,
+    delta_t_train,
+    learning_rate=1e-3,
+    n_epochs=1000,
+    initial_batch_size=64,
+    initial_n_neg=2,
+    buffer_size=5,
+    loss_type="contrastive",
+    optimizer=None,
+    max_n_neg=256,
+    min_batch_size=4,
+):
+    """
+    Train the C3PO model with adaptive negative sampling and batch size.
+
+    Parameters:
+        model (C3PO): The C3PO model to train.
+        params (dict): The initial parameters of the model.
+        x_train (jnp.array): The training data marks.
+        delta_t_train (jnp.array): The training data time intervals.
+        learning_rate (float): The learning rate for the optimizer.
+        n_epochs (int): The maximum number of epochs to train.
+        initial_batch_size (int): The initial batch size for training.
+        initial_n_neg (int): The initial number of negative samples.
+        buffer_size (int): The minimum number of epochs to wait before adjusting n_neg or batch size.
+        loss_type (str): The type of loss function to use ('contrastive' or 'mle').
+        optimizer (optax.GradientTransformation): The optimizer to use. If None, Adam is used.
+        max_n_neg (int): The maximum number of negative samples.
+        min_batch_size (int): The minimum batch size.
+
+    Returns:
+        params (dict): The trained model parameters.
+        tracked_loss (list): The tracked loss values over epochs.
+    """
+    # prepare the optimizer and model for training
+    if optimizer is None:
+        optimizer = optax.chain(
+            optax.adam(learning_rate),
+        )
+    opt_state = optimizer.init(params)
+    model = update_n_neg(model, initial_n_neg)
+
+    tracked_loss = []
+    batch_size = initial_batch_size
+    n_neg = initial_n_neg
+    buffer = buffer_size
+
+    # create jittable loss and grad functions
+    loss_fn = _make_loss_fn(model, loss_type=loss_type)
+    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+
+    try:
+        for i in range(n_epochs):
+            # apply one epoch of training
+            params, opt_state, epoch_loss = train_epoch(
+                model,
+                params,
+                x_train,
+                delta_t_train,
+                jax.random.PRNGKey(i),
+                batch_size,
+                optimizer,
+                opt_state,
+                loss_grad_fn,
+                epoch_number=i + 1,
+                n_neg=n_neg,
+            )
+            tracked_loss.append(epoch_loss)
+            buffer -= 1
+
+            # allow at least buffer_size epochs before adjusting
+            if buffer > 0:
+                continue
+
+            # check if stalled
+            if np.mean(tracked_loss[-5:-1]) >= tracked_loss[-1] * 1.01:
+                continue  # still improving
+
+            # stalled, try to increase n_neg
+            if n_neg < max_n_neg:
+                del loss_grad_fn  # free memory
+                jax.clear_caches()
+
+                # update n_neg, model, and loss functions
+                n_neg = min(n_neg * 2, max_n_neg)
+                model = update_n_neg(model, n_neg)
+                loss_fn = _make_loss_fn(model, loss_type=loss_type)
+                loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                buffer = buffer_size  # reset buffer
+                continue
+
+            # stalled, try to adjust batch size
+            elif batch_size > min_batch_size:
+                del loss_grad_fn  # free memory
+                jax.clear_caches()
+                # update batch_size, n_neg, model, and loss functions
+                batch_size = max(batch_size // 2, min_batch_size)
+                buffer = buffer_size  # reset buffer
+                n_neg = max(initial_n_neg, max_n_neg // 8)
+                model = update_n_neg(model, n_neg)
+                loss_fn = _make_loss_fn(model, loss_type=loss_type)
+                loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                print(
+                    f"Stalled training, decreasing batch size to {batch_size} and n_neg to {n_neg}"
+                )
+                buffer = buffer_size  # reset buffer
+                continue
+
+            else:
+                print("Stalled training, no further adjustments possible.")
+                break
+    except KeyboardInterrupt:
+        print("Training interrupted by user.")
+
+    return params, tracked_loss
+
+
+def train_epoch(
+    model,
+    params,
+    x_train,
+    delta_t_train,
+    rand_key,
+    batch_size,
+    optimizer,
+    opt_state,
+    loss_grad_fn,
+    epoch_number=None,
+    n_neg=None,
+):
+    """Train the model for one epoch.
+
+    Args:
+        model (C3PO): The C3PO model to train.
+        params (dict): The model parameters.
+        x_train (jnp.array): The training data marks.
+        delta_t_train (jnp.array): The training data time intervals.
+        rand_key (jnp.array): The random key for JAX.
+        batch_size (int): The batch size for training.
+        optimizer (optax.GradientTransformation): The optimizer to use.
+        opt_state (optax.OptState): The optimizer state.
+        loss_grad_fn (Callable): The loss and gradient function.
+        epoch_number (int, optional): The epoch number for logging. Defaults to None.
+        n_neg (int, optional): The number of negative samples for logging. Defaults to None.
+
+    Raises:
+        ValueError: If the loss is not finite.
+    Returns:
+        params (dict): The updated model parameters.
+        opt_state (optax.OptState): The updated optimizer state.
+        average_epoch_loss (float): The average loss for the epoch.
+    """
+    ind = np.arange(x_train.shape[0])
+    np.random.shuffle(ind)
+    epoch_loss = []
+    j = 0
+    with tqdm(
+        total=x_train.shape[0], desc=f"Epoch {epoch_number}", unit="samples"
+    ) as pbar:
+        prev_params = params.copy()  # store params from end of previous epoch
+        while j < x_train.shape[0]:
+            # Perform one gradient update.
+            rand_key, _ = jax.random.split(rand_key)
+            batch_inds = ind[j : j + batch_size]
+            if len(batch_inds) < batch_size:
+                break
+            loss_val, grads = loss_grad_fn(
+                params, x_train[batch_inds], delta_t_train[batch_inds], rand_key
+            )
+            if not np.isfinite(loss_val):
+                params = prev_params.copy()
+                raise ValueError("Loss is not finite")
+            epoch_loss.append(loss_val)
+            updates, opt_state = optimizer.update(grads, opt_state, params)
+            params = optax.apply_updates(params, updates)
+            j += batch_size
+
+            pbar.update(batch_size)
+            pbar.set_postfix(
+                loss=np.mean(epoch_loss), n_neg=n_neg, batch_size=batch_size
+            )
+
+    average_epoch_loss = np.mean(epoch_loss)
+    return params, opt_state, average_epoch_loss
+
+
+def update_n_neg(model, new_n_neg):
+    """Updates the number of negative samples in the model.
+
+    Args:
+        model (C3PO): The model to update.
+        new_n_neg (int): The new number of negative samples.
+
+    Returns:
+        C3PO: The updated model.
+    """
+    new_model = C3PO(
+        encoder_args=model.encoder_args,
+        context_args=model.context_args,
+        rate_args=model.rate_args,
+        distribution=model.distribution,
+        latent_dim=model.latent_dim,
+        context_dim=model.context_dim,
+        n_neg_samples=new_n_neg,
+        predicted_sequence_length=model.predicted_sequence_length,
+        context_convolutional=model.context_convolutional,
+        sample_params=model.sample_params,
+        return_embeddings_in_call=model.return_embeddings_in_call,
+    )
+    return new_model
