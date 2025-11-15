@@ -51,6 +51,9 @@ def context_factory(context_model: str, context_dim: int, **kwargs):
     elif context_model == "slidingWindow":
         kwargs.pop("infer_init", None)
         return SlidingWindow(context_dim=context_dim, **kwargs)
+    elif context_model == "multi_model":
+        kwargs.pop("infer_init", None)
+        return MultiModelContext(context_dim=context_dim, **kwargs)
     else:
         raise ValueError(f"Unknown context model: {context_model}")
 
@@ -76,6 +79,79 @@ class BaseContext(nn.RNNCellBase):
     @property
     def num_feature_axes(self):
         return 1
+
+
+class MultiModelContext(nn.Module):
+    context_dim: int
+    model_args: Sequence[dict]
+
+    def setup(self):
+        assert len(self.model_args) == len(
+            self.model_args
+        ), "model_names and model_kwargs must have the same length"
+        # self.models = []
+        # for args in self.model_args:
+        #     name = args.pop("context_model")
+        #     self.models.append(
+        #         context_factory(name, context_dim=self.context_dim, **args)
+        #     )
+        self.models = [
+            context_factory(context_dim=self.context_dim, **args)
+            for args in self.model_args
+        ]
+        self.num_models = len(self.models)
+
+    def __call__(self, z):
+        outputs = jnp.stack([model(z) for model in self.models], axis=0)
+        return jnp.sum(outputs, axis=0)
+
+
+class MultiModelContextv0(BaseContext):
+    context_dim: int
+    model_args: Sequence[dict]
+
+    def setup(self):
+        assert len(self.model_args) == len(
+            self.model_args
+        ), "model_names and model_kwargs must have the same length"
+        # self.models = []
+        # for args in self.model_args:
+        #     name = args.pop("context_model")
+        #     self.models.append(
+        #         context_factory(name, context_dim=self.context_dim, **args)
+        #     )
+        self.models = [
+            context_factory(context_dim=self.context_dim, **args)
+            for args in self.model_args
+        ]
+        self.num_models = len(self.models)
+
+    def __call__(self, carry, z):
+        new_carry = []
+        outputs = []
+        for i, model in enumerate(self.models):
+            c_i = carry[i]
+            if c_i is None:
+                new_carry.append(None)
+                outputs.append(model(z))
+                continue
+            new_c_i, out_i = model(c_i, z)
+            new_carry.append(new_c_i)
+            outputs.append(out_i)
+        # average the outputs
+        output = sum(outputs)
+        return new_carry, output
+
+    def initialize_carry(self, init_key, input_shape):
+        carry = []
+        for i, model in enumerate(self.models):
+            key, init_key = jax.random.split(init_key)
+            if hasattr(model, "initialize_carry"):
+                c_i = model.initialize_carry(key, input_shape)
+            else:
+                c_i = None
+            carry.append(c_i)
+        return carry
 
 
 class DefaultInferCarry(nn.Module):
