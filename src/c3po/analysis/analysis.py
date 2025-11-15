@@ -3,7 +3,7 @@ from sklearn.decomposition import PCA
 from tqdm import tqdm
 
 import jax
-
+from functools import lru_cache
 from ..model.model import Embedding, C3PO
 
 from flax import serialization
@@ -497,7 +497,9 @@ class C3poAnalysis:
 
     # ----------------------------------------------------------------------------------
     # Frequency analysis tools
-    def power_spectrum(self, intervals: np.ndarray = None, window_size=1000, pca=True):
+    def power_spectrum(
+        self, intervals: np.ndarray = None, window_size=1000, pca=True, nfft=10000
+    ):
         """Compute the power spectrum of the context using welch's method
 
         Parameters:
@@ -541,7 +543,7 @@ class C3poAnalysis:
                     window=window_filt,
                     noverlap=noverlap,
                     scaling="density",
-                    nfft=10000,
+                    nfft=nfft,
                 )
                 weight_i = np.floor(len(c) - window_size / (window_size - noverlap)) + 1
                 spectrums.append(P_i)
@@ -591,11 +593,13 @@ class C3poAnalysis:
         smooth_context: int = None,
     ):
         self._check_embedded_data()
-        t_data, c_data = self._select_data(pca, interpolate)
-        if smooth_context:
-            from scipy.ndimage import gaussian_filter1d
 
-            c_data = gaussian_filter1d(c_data, smooth_context, axis=0, mode="nearest")
+        if smooth_context:
+            t_data, c_data = self._smooth_context(
+                pca=pca, interpolated=interpolate, sigma=smooth_context
+            )
+        else:
+            t_data, c_data = self._select_data(pca, interpolated=interpolate)
 
         if self.decoder_model is None:
             raise ValueError("Decoder model not initialized")
@@ -643,11 +647,20 @@ class C3poAnalysis:
         self.decoder_model.fit(c_data, feature_values)
         self.decode_pca = pca
 
-    def predict_decoder(self, interval, interpolate=False):
+    def predict_decoder(self, interval, interpolate=False, smooth_context: int = None):
         self._check_embedded_data()
         if self.decoder_model is None:
             raise ValueError("Decoder model not initialized")
-        t_data, c_data = self._select_data(self.decode_pca, interpolated=interpolate)
+
+        if smooth_context:
+            t_data, c_data = self._smooth_context(
+                pca=self.decode_pca, interpolated=interpolate, sigma=smooth_context
+            )
+        else:
+            t_data, c_data = self._select_data(
+                self.decode_pca, interpolated=interpolate
+            )
+
         ind = np.where(np.logical_and(t_data >= interval[0], t_data <= interval[1]))[0]
         if len(ind) == 0:
             return np.array([]), np.array([])
@@ -666,6 +679,15 @@ class C3poAnalysis:
         self._check_embedded_data()
         if any(val is None for val in [self.t_interp, self.c_interp]):
             raise ValueError("Data not interpolated yet")
+
+    @lru_cache(maxsize=1)
+    def _smooth_context(self, pca: bool, interpolated: bool, sigma: int):
+        from scipy.ndimage import gaussian_filter1d
+
+        self._check_embedded_data()
+        t_data, c_data = self._select_data(pca, interpolated=interpolated)
+        c_smooth = gaussian_filter1d(c_data, sigma, axis=0, mode="nearest")
+        return t_data, c_smooth
 
     # ----------------------------------------------------------------------------------
     # Save/load embedded data
