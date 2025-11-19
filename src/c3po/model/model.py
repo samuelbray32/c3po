@@ -7,6 +7,7 @@ if os.environ.get("CUDA_VISIBLE_DEVICES", None) is None:
 import jax
 import jax.numpy as jnp
 import flax.linen as nn
+from jax import pmap
 from flax.linen import Module
 from functools import partial
 import numpy as np
@@ -509,6 +510,7 @@ def train_model(
     optimizer=None,
     max_n_neg=256,
     min_batch_size=4,
+    multi_gpu=False,
 ):
     """
     Train the C3PO model with adaptive negative sampling and batch size.
@@ -527,6 +529,7 @@ def train_model(
         optimizer (optax.GradientTransformation): The optimizer to use. If None, Adam is used.
         max_n_neg (int): The maximum number of negative samples.
         min_batch_size (int): The minimum batch size.
+        multi_gpu (bool): Whether to use multiple GPUs for training.
 
     Returns:
         params (dict): The trained model parameters.
@@ -547,24 +550,45 @@ def train_model(
 
     # create jittable loss and grad functions
     loss_fn = _make_loss_fn(model, loss_type=loss_type)
-    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+    if not multi_gpu:
+        loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+    else:
+        # loss_grad_fn = pmap(loss_grad_fn, in_axes=(None, 0, 0, 0))
+        train_step_fn = make_multi_gpu_train_step(loss_fn, optimizer)
 
     try:
         for i in range(n_epochs):
             # apply one epoch of training
-            params, opt_state, epoch_loss = train_epoch(
-                model,
-                params,
-                x_train,
-                delta_t_train,
-                jax.random.PRNGKey(i),
-                batch_size,
-                optimizer,
-                opt_state,
-                loss_grad_fn,
-                epoch_number=i + 1,
-                n_neg=n_neg,
-            )
+            if multi_gpu:
+                # raise NotImplementedError("Multi-GPU training not implemented yet.")
+                params, opt_state, epoch_loss = train_epoch_multi_gpu(
+                    model,
+                    params,
+                    x_train,
+                    delta_t_train,
+                    jax.random.PRNGKey(i),
+                    batch_size,
+                    optimizer,
+                    opt_state,
+                    # loss_grad_fn,
+                    train_step_fn,
+                    epoch_number=i + 1,
+                    n_neg=n_neg,
+                )
+            else:
+                params, opt_state, epoch_loss = train_epoch(
+                    model,
+                    params,
+                    x_train,
+                    delta_t_train,
+                    jax.random.PRNGKey(i),
+                    batch_size,
+                    optimizer,
+                    opt_state,
+                    loss_grad_fn,
+                    epoch_number=i + 1,
+                    n_neg=n_neg,
+                )
             tracked_loss.append(epoch_loss)
             buffer -= 1
 
@@ -578,28 +602,41 @@ def train_model(
 
             # stalled, try to increase n_neg
             if n_neg < max_n_neg:
-                del loss_grad_fn  # free memory
-                jax.clear_caches()
-
                 # update n_neg, model, and loss functions
                 n_neg = min(n_neg * 2, max_n_neg)
                 model = update_n_neg(model, n_neg)
+                # update the training functions
                 loss_fn = _make_loss_fn(model, loss_type=loss_type)
-                loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                if not multi_gpu:
+                    del loss_grad_fn  # free memory
+                    jax.clear_caches()
+                    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                else:
+                    del train_step_fn  # free memory
+                    jax.clear_caches()
+                    train_step_fn = make_multi_gpu_train_step(loss_fn, optimizer)
                 buffer = buffer_size  # reset buffer
                 continue
 
             # stalled, try to adjust batch size
             elif batch_size > min_batch_size:
-                del loss_grad_fn  # free memory
-                jax.clear_caches()
                 # update batch_size, n_neg, model, and loss functions
                 batch_size = max(batch_size // 2, min_batch_size)
                 buffer = buffer_size  # reset buffer
                 n_neg = max(initial_n_neg, max_n_neg // 8)
                 model = update_n_neg(model, n_neg)
+                # update the training functions
                 loss_fn = _make_loss_fn(model, loss_type=loss_type)
-                loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                if not multi_gpu:
+                    del loss_grad_fn  # free memory
+                    jax.clear_caches()
+                    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                else:
+                    del train_step_fn  # free memory
+                    jax.clear_caches()
+                    # loss_grad_fn = pmap(loss_grad_fn, in_axes=(None, 0, 0, 0))
+                    train_step_fn = make_multi_gpu_train_step(loss_fn, optimizer)
+                buffer = buffer_size  # reset buffer
                 print(
                     f"Stalled training, decreasing batch size to {batch_size} and n_neg to {n_neg}"
                 )
@@ -682,6 +719,142 @@ def train_epoch(
 
     average_epoch_loss = np.mean(epoch_loss)
     return params, opt_state, average_epoch_loss
+
+
+def make_multi_gpu_train_step(loss_fn, optimizer):
+    """Create a function to perform a training step using multiple GPUs.
+
+    Args:
+        loss_fn (Callable): The loss function to use.
+        optimizer (optax.GradientTransformation): The optimizer to use.
+
+    Returns:
+        Callable: The multi-GPU train step function. Inputs should be split across devices.
+            Args:
+                params (dict): The model parameters.
+                opt_state (optax.OptState): The optimizer state.
+                x (jnp.array): The input data marks.
+                delta_t (jnp.array): The input data time intervals.
+                rng (jnp.array): The random key for JAX.
+            Returns:
+                params (dict): The updated model parameters.
+                opt_state (optax.OptState): The updated optimizer state.
+                loss (float): The loss value.
+    """
+
+    @partial(pmap, axis_name="devices")
+    def train_step(params, opt_state, x, delta_t, rng):
+        # rand_split = jax.random.split(rng, jax.local_device_count())
+        # value_and_grad = jax.pmap(jax.value_and_grad(loss_fn), axis_name="devices")
+        value_and_grad = jax.value_and_grad(loss_fn)
+        loss, grads = value_and_grad(params, x, delta_t, rng)
+
+        # Average across devices
+        loss = jax.lax.pmean(loss, axis_name="devices")
+        grads = jax.lax.pmean(grads, axis_name="devices")
+
+        updates, opt_state = optimizer.update(grads, opt_state, params)
+        params = optax.apply_updates(params, updates)
+        return params, opt_state, loss
+
+    return train_step
+
+
+def train_epoch_multi_gpu(
+    model,
+    params,
+    x_train,
+    delta_t_train,
+    rand_key,
+    batch_size,
+    optimizer,
+    opt_state,
+    # loss_grad_fn,
+    train_step_fn,
+    epoch_number=None,
+    n_neg=None,
+):
+    """Train the model for one epoch using multiple GPUs.
+
+    Args:
+        model (C3PO): The C3PO model to train.
+        params (dict): The model parameters.
+        x_train (jnp.array): The training data marks.
+        delta_t_train (jnp.array): The training data time intervals.
+        rand_key (jnp.array): The random key for JAX.
+        batch_size (int): The batch size for training.
+        optimizer (optax.GradientTransformation): The optimizer to use.
+        opt_state (optax.OptState): The optimizer state.
+        train_step_fn (Callable): The multi-GPU train step function.
+        epoch_number (int, optional): The epoch number for logging. Defaults to None.
+        n_neg (int, optional): The number of negative samples for logging. Defaults to None
+    Returns::
+        params (dict): The updated model parameters.
+        opt_state (optax.OptState): The updated optimizer state.
+        average_epoch_loss (float): The average loss for the epoch.
+    """
+    split_params = jax.device_put_replicated(params, jax.devices())
+    split_opt_state = jax.device_put_replicated(opt_state, jax.devices())
+    # Number of available GPUs
+    num_devices = jax.device_count()
+    total_batch_size = batch_size * num_devices
+
+    def get_batches(x, delta_t):
+        """Simulate getting independent batches for each device."""
+        return np.array([x[i::num_devices] for i in range(num_devices)]), np.array(
+            [delta_t[i::num_devices] for i in range(num_devices)]
+        )
+
+    ind = np.arange(x_train.shape[0])
+    np.random.shuffle(ind)
+    epoch_loss = []
+    j = 0
+    with tqdm(
+        total=x_train.shape[0], desc=f"Epoch {epoch_number}", unit="samples"
+    ) as pbar:
+        while j < x_train.shape[0]:
+            # Perform one gradient update.
+            rand_key, _ = jax.random.split(rand_key)
+            batch_inds = ind[j : j + total_batch_size]
+            if batch_inds.shape[0] < total_batch_size:
+                break
+
+            x_batch, delta_t_batch = get_batches(
+                x_train[batch_inds],
+                delta_t_train[batch_inds],
+            )
+            # print(x_batch.shape, delta_t_batch.shape)
+            # loss_val, grads = loss_grad_fn(
+            #     split_params, x_batch, delta_t_batch, rand_key
+            # )
+
+            # if not np.isfinite(loss_val):
+            #     raise ValueError("Loss is not finite")
+            # epoch_loss.append(loss_val)
+            # updates, opt_state = optimizer.update(grads, opt_state, params)
+            # params = optax.apply_updates(params, updates)
+
+            split_params, split_opt_state, loss_val = train_step_fn(
+                split_params,
+                split_opt_state,
+                x_batch,
+                delta_t_batch,
+                jax.random.split(rand_key, num_devices),
+            )
+            epoch_loss.append(loss_val.mean())
+
+            j += total_batch_size
+
+            pbar.update(total_batch_size)
+            pbar.set_postfix(
+                loss=np.mean(epoch_loss), n_neg=n_neg, batch_size=batch_size
+            )
+
+    merged_params = jax.tree_util.tree_map(lambda x: x[0], split_params)
+    average_epoch_loss = np.mean(epoch_loss)
+    opt_state = jax.tree_util.tree_map(lambda x: x[0], split_opt_state)
+
+    return merged_params, opt_state, average_epoch_loss
 
 
 def update_n_neg(model, new_n_neg):
