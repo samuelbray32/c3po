@@ -4,9 +4,13 @@ from tqdm import tqdm
 
 import jax
 from functools import lru_cache
-from ..model.model import Embedding, C3PO
+from multiprocessing import Pool
+from scipy.signal import correlate
+from typing import Tuple, List
 
 from flax import serialization
+
+from ..model.model import Embedding, C3PO
 
 
 def interval_list_contains_ind(interval_list, timestamps):
@@ -77,6 +81,32 @@ class C3poAnalysis:
 
         self.decoder_model = None
         self.decode_pca = None
+
+    def copy(self):
+        new_analysis = C3poAnalysis(
+            model=self.model,
+            model_args=self.model_args,
+            params=self.params,
+        )
+
+        new_analysis.z = None if self.z is None else self.z.copy()
+        new_analysis.c = None if self.c is None else self.c.copy()
+        new_analysis.t = None if self.t is None else self.t.copy()
+        new_analysis.t_interp = None if self.t_interp is None else self.t_interp.copy()
+        new_analysis.c_interp = None if self.c_interp is None else self.c_interp.copy()
+        new_analysis.c_pca = None if self.c_pca is None else self.c_pca.copy()
+        new_analysis.c_pca_interp = (
+            None if self.c_pca_interp is None else self.c_pca_interp.copy()
+        )
+
+        new_analysis.pca = getattr(self, "pca", None)
+
+        new_analysis.decoder_model = (
+            None if self.decoder_model is None else self.decoder_model
+        )
+        new_analysis.decode_pca = self.decode_pca
+
+        return new_analysis
 
     def initialize_from_table_entry(self, init_key):
         from ..tables.dev_tables import C3POStorage
@@ -255,7 +285,7 @@ class C3poAnalysis:
         if self.pca is None:
             raise ValueError("pca must first be fit to data")
         self.c_pca_interp = None
-        if self.c_pca is None:
+        if True:  # self.c_pca is None:
             self.c_pca = np.ones_like(self.c) * np.nan
             ind_valid = (~np.isnan(self.c)).any(axis=1)
             self.c_pca[ind_valid] = self.pca.transform(self.c[ind_valid])
@@ -342,6 +372,7 @@ class C3poAnalysis:
         valid_intervals=None,
         pca=False,
         interpolated=False,
+        return_counts=False,
     ):
         """
         Bin the context by co-occurring feature values
@@ -435,7 +466,15 @@ class C3poAnalysis:
                 b2
             ] = row.val  # Each is now an array of shape (n_bin, n_dim)
 
-        return context_binned, bins_1, bins_2
+        if not return_counts:
+            return context_binned, bins_1, bins_2
+
+        else:
+            counts = np.zeros((len(bins_1), len(bins_2)), dtype=int)
+            for b1 in range(len(bins_1)):
+                for b2 in range(len(bins_2)):
+                    counts[b1, b2] = len(context_binned[b1][b2])
+            return context_binned, bins_1, bins_2, counts
 
     from typing import Optional, Tuple
 
@@ -564,6 +603,92 @@ class C3poAnalysis:
             hi.append(results[2])
 
         return frequencies, np.array(mid), np.array(lo), np.array(hi)
+
+    def cross_correlation(
+        self, pca=True, max_lag_seconds=1.0, intervals=None, dim_limit=None, processes=1
+    ):
+        t, c = self._select_data(pca, interpolated=True)
+        ind_valid = (~np.isnan(c)).any(axis=1)
+        t = t[ind_valid]
+        c = c[ind_valid, :]
+
+        fs = np.mean(np.diff(t)) ** -1
+        max_lag = int(max_lag_seconds * fs)
+        from scipy.signal import correlate
+
+        n_dim = c.shape[1]
+
+        if intervals is None:
+            intervals = np.array([[t[0], t[-1]]])
+        if dim_limit is not None:
+            n_dim = min(n_dim, dim_limit)
+
+        cross_corrs = np.zeros((n_dim, n_dim, 2 * max_lag + 1))
+
+        if processes == 1:
+            for i in range(n_dim):
+                for j in tqdm(range(n_dim)):
+                    cross_corrs[i, j, :] = _single_cross_correlation(
+                        c, t, i, j, intervals, max_lag
+                    )[0]
+                # corr_ij = []
+                # weights = []
+                # for interval in intervals:
+                #     ind = np.where(np.logical_and(t >= interval[0], t <= interval[1]))[
+                #         0
+                #     ]
+                #     if len(ind) < max_lag * 2:
+                #         continue
+                #     c_i = c[ind, i]
+                #     c_j = c[ind, j]
+                #     corr_full = correlate(
+                #         c_i - np.mean(c_i), c_j - np.mean(c_j), mode="full"
+                #     )
+                #     mid = len(corr_full) // 2
+                #     corr_ij.append(corr_full[mid - max_lag : mid + max_lag + 1])
+                #     weights.append(len(c_i) - max_lag)
+                # cross_corrs[i, j, :] = np.average(corr_ij, axis=0, weights=weights)
+
+        else:
+            # with Pool(processes=processes) as pool:
+            #     args = []
+            #     for i in range(n_dim):
+            #         for j in range(n_dim):
+            #             args.append((c, t, i, j, intervals, max_lag))
+            #     results = []
+            #     for r in tqdm(pool.imap_unordered(_single_cross_correlation, args)):
+            #         results.append(r)
+            #     for idx, result in enumerate(results):
+            #         i = result[1]
+            #         j = result[2]
+            #         cross_corrs[i, j, :] = result[0]
+            args = []
+            for i in range(n_dim):
+                for j in range(n_dim):
+                    args.append((i, j, intervals, max_lag))
+            n_tasks = len(args)
+            with Pool(
+                processes=processes,
+                initializer=_init_cc_worker,
+                initargs=(c, t),
+            ) as pool:
+                # Tune chunksize so each worker gets a batch of tasks
+                chunksize = max(1, n_tasks // (processes * 4))
+                results = []
+                for r in tqdm(
+                    pool.imap_unordered(
+                        _single_cross_correlation_worker, args, chunksize
+                    ),
+                    total=n_tasks,
+                ):
+                    results.append(r)
+            for idx, result in enumerate(results):
+                i = result[1]
+                j = result[2]
+                cross_corrs[i, j, :] = result[0]
+
+        lags = np.arange(-max_lag, max_lag + 1) / fs
+        return lags, cross_corrs
 
     # ----------------------------------------------------------------------------------
     # decoder tools: Testing decodability of latent factors to known variables
@@ -808,3 +933,96 @@ def _weighted_quantile_single(
 
     weighted_quantiles /= np.sum(sample_weight)
     return np.interp(quantiles, weighted_quantiles, values)
+
+
+def _single_cross_correlation(c, t, i, j, intervals, max_lag):
+    """Returns the cross-correlation between dimensions i and j of c over the specified intervals.
+
+    Parameters
+    ----------
+    c : np.ndarray
+        Context array of shape (n_samples, n_dimensions).
+    t : np.ndarray
+        Time array of shape (n_samples,).
+    i : int
+        First dimension index.
+    j : int
+        Second dimension index.
+    intervals : (n_intervals, 2)
+        Intervals array.
+    max_lag : int
+        Maximum lag (indices).
+
+    Returns
+    -------
+    result : tuple
+        (cross_corr, i, j)
+        cross_corr : (2 * max_lag + 1,)
+            Cross-correlation values.
+        i : int
+            First dimension index.
+        j : int
+            Second dimension index.
+    """
+    corr_ij = []
+    weights = []
+    for interval in intervals:
+        ind = np.where(np.logical_and(t >= interval[0], t <= interval[1]))[0]
+        if len(ind) < max_lag * 2:
+            continue
+        c_i = c[ind, i]
+        c_j = c[ind, j]
+        corr_full = correlate(c_i - np.mean(c_i), c_j - np.mean(c_j), mode="full")
+        mid = len(corr_full) // 2
+        corr_ij.append(corr_full[mid - max_lag : mid + max_lag + 1])
+        weights.append(len(c_i) - max_lag)
+    return np.average(corr_ij, axis=0, weights=weights), i, j
+
+
+_c_global: np.ndarray | None = None
+_t_global: np.ndarray | None = None
+
+
+def _init_cc_worker(c: np.ndarray, t: np.ndarray) -> None:
+    """Initializer that runs once in each worker process."""
+    global _c_global, _t_global
+    _c_global = c
+    _t_global = t
+
+
+def _single_cross_correlation_worker(
+    args: Tuple[int, int, np.ndarray, int],
+) -> Tuple[np.ndarray, int, int]:
+    """Wrapper that uses global arrays to avoid sending them each time.
+
+    Parameters
+    ----------
+    args : tuple
+        (i, j, intervals, max_lag)
+        i : int
+            First dimension index.
+        j : int
+            Second dimension index.
+        intervals : (n_intervals, 2)
+            Intervals array.
+        max_lag : int
+            Maximum lag.
+
+    Returns
+    -------
+    result : tuple
+        (cross_corr, i, j)
+        cross_corr : (2 * max_lag + 1,)
+            Cross-correlation values.
+        i : int
+            First dimension index.
+        j : int
+            Second dimension index.
+    """
+    global _c_global, _t_global
+    i, j, intervals, max_lag = args
+    # Your existing function – now uses globals instead of passing c, t
+    cross_corr = _single_cross_correlation(
+        _c_global, _t_global, i, j, intervals, max_lag
+    )
+    return cross_corr
