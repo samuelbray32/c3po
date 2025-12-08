@@ -320,6 +320,7 @@ class C3poAnalysis:
         valid_intervals=None,
         pca=False,
         interpolated=False,
+        alt_data=None,
     ):
         """
         Bin the context by co-occurring feature values
@@ -329,9 +330,13 @@ class C3poAnalysis:
             feature_times (np.ndarray): Times of the feature values. Shape (n_samples,).
             bins (int, optional): Number of bins to use. Defaults to None.
             valid_intervals (np.ndarray, optional): Intervals to consider. Defaults to None.
+            alt_data (np.ndarray, optional): Alternative data to bin instead of context. Defaults to None.
         """
-        self._check_embedded_data()
-        t_data, c_data = self._select_data(pca, interpolated)
+        if alt_data is None:
+            self._check_embedded_data()
+            t_data, c_data = self._select_data(pca, interpolated)
+        else:
+            t_data, c_data = alt_data
 
         if valid_intervals is None:
             valid_intervals = np.array(
@@ -343,14 +348,15 @@ class C3poAnalysis:
                 ]
             )
 
-        if bins is None:
+        if bins is None or isinstance(bins, int):
+            n_bins = 30 if bins is None else bins
             ind_feature = interval_list_contains_ind(valid_intervals, feature_times)
             bins = np.linspace(
-                np.min(feature[ind_feature]), np.max(feature[ind_feature]), 30
+                np.min(feature[ind_feature]), np.max(feature[ind_feature]), n_bins
             )
 
         ind_context = interval_list_contains_ind(valid_intervals, t_data)
-        context_to_feature_ind = np.digitize(t_data[ind_context], feature_times)
+        context_to_feature_ind = np.digitize(t_data[ind_context], feature_times) - 1
         context_features = feature[context_to_feature_ind]
 
         context_binned = []
@@ -398,15 +404,21 @@ class C3poAnalysis:
                 ]
             )
 
-        if bins_1 is None:
+        if bins_1 is None or isinstance(bins_1, int):
+            n_bins_1 = 30 if bins_1 is None else bins_1
             ind_feature_1 = interval_list_contains_ind(valid_intervals, feature_1_times)
             bins_1 = np.linspace(
-                np.min(feature_1[ind_feature_1]), np.max(feature_1[ind_feature_1]), 30
+                np.min(feature_1[ind_feature_1]),
+                np.max(feature_1[ind_feature_1]),
+                n_bins_1,
             )
-        if bins_2 is None:
+        if bins_2 is None or isinstance(bins_2, int):
+            n_bins_2 = 30 if bins_2 is None else bins_2
             ind_feature_2 = interval_list_contains_ind(valid_intervals, feature_2_times)
             bins_2 = np.linspace(
-                np.min(feature_2[ind_feature_2]), np.max(feature_2[ind_feature_2]), 30
+                np.min(feature_2[ind_feature_2]),
+                np.max(feature_2[ind_feature_2]),
+                n_bins_2,
             )
 
         ind_context = interval_list_contains_ind(valid_intervals, t_data)
@@ -537,7 +549,12 @@ class C3poAnalysis:
     # ----------------------------------------------------------------------------------
     # Frequency analysis tools
     def power_spectrum(
-        self, intervals: np.ndarray = None, window_size=1000, pca=True, nfft=10000
+        self,
+        intervals: np.ndarray = None,
+        window_size=1000,
+        pca=True,
+        nfft=10000,
+        sourced_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ):
         """Compute the power spectrum of the context using welch's method
 
@@ -548,7 +565,11 @@ class C3poAnalysis:
             pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
 
         """
-        t, c = self._select_data(pca, interpolated=True)
+        t, c = (
+            self._select_data(pca, interpolated=True)
+            if sourced_data is None
+            else sourced_data
+        )
         ind_valid = (~np.isnan(c)).any(axis=1)
         t = t[ind_valid]
         c = c[ind_valid, :]
@@ -705,6 +726,11 @@ class C3poAnalysis:
 
                 self.decoder_model = LinearRegression(**kwargs)
 
+            elif model_type == "discretized_regression":
+                from .decoder_models import DiscretizedRegression
+
+                self.decoder_model = DiscretizedRegression(**kwargs)
+
             else:
                 raise ValueError(f"Unknown model type {model_type}")
 
@@ -714,8 +740,12 @@ class C3poAnalysis:
         feature_times,
         intervals=None,
         pca=True,
+        decode_dim: slice = slice(None),
         interpolate=False,
         smooth_context: int = None,
+        balance_features=False,
+        balance_features_bins=10,
+        balance_features_min_count: int = 50,
     ):
         self._check_embedded_data()
 
@@ -725,6 +755,8 @@ class C3poAnalysis:
             )
         else:
             t_data, c_data = self._select_data(pca, interpolated=interpolate)
+
+        c_data = c_data[:, decode_dim]
 
         if self.decoder_model is None:
             raise ValueError("Decoder model not initialized")
@@ -743,6 +775,11 @@ class C3poAnalysis:
         c_data = c_data[ind]
 
         ind = np.where(~np.isnan(c_data).any(axis=1))[0]
+        c_data = c_data[ind]
+        feature_times = feature_times[ind]
+        feature_values = feature_values[ind]
+
+        ind = np.where(~np.isnan(feature_values).any(axis=1))[0]
         c_data = c_data[ind]
         feature_times = feature_times[ind]
         feature_values = feature_values[ind]
@@ -769,8 +806,128 @@ class C3poAnalysis:
         #     )
         # ]
 
+        """
+        BAD
+        # if balance_features:
+        #     if feature_values.ndim > 1 and feature_values.shape[1] > 1:
+        #         context_binned, bins = self.bin_context_by_feature_2d(
+        #             feature_values[:, 0],
+        #             feature_times,
+        #             feature_values[:, 1],
+        #             feature_times,
+        #             bins_1=balance_features_bins,
+        #             bins_2=balance_features_bins,
+        #             valid_intervals=intervals,
+        #             pca=pca,
+        #             interpolated=interpolate,
+        #         )
+        #         context_binned = [c for sublist in context_binned for c in sublist]
+
+        #     else:
+        #         context_binned, bins = self.bin_context_by_feature(
+        #             np.squeeze(feature_values),
+        #             feature_times,
+        #             # bins=balance_features_bins,
+        #             valid_intervals=intervals,
+        #             pca=pca,
+        #             interpolated=interpolate,
+        #         )
+
+        #     min_count = min(
+        #         [len(bin_data) for bin_data in context_binned if len(bin_data) > 0]
+        #     )
+        #     min_count = min(min_count, balance_features_min_count)
+
+        #     c_data_balanced = []
+        #     feature_values_balanced = []
+        #     for i, bin_data in enumerate(context_binned):
+        #         if len(bin_data) == 0:
+        #             continue
+        #         selected_indices = np.random.choice(
+        #             len(bin_data), size=min(min_count, len(bin_data)), replace=False
+        #         )
+        #         c_data_balanced.append(bin_data[selected_indices])
+        #         feature_values_balanced.append(
+        #             np.full(
+        #                 (min_count,) + feature_values.shape[1:],
+        #                 (bins[i] + bins[i + 1]) / 2,
+        #             )
+        #         )
+        #     c_data = np.vstack(c_data_balanced)
+        #     feature_values = np.vstack(feature_values_balanced)
+        """
+        if balance_features and (
+            feature_values.ndim == 1 or feature_values.shape[1] == 1
+        ):
+            bins = np.linspace(
+                np.min(feature_values),
+                np.max(feature_values),
+                balance_features_bins + 1,
+            )
+            feature_bin_index = np.digitize(feature_values, bins) - 1
+            min_count = min(
+                [
+                    np.sum(feature_bin_index == i)
+                    for i in range(len(bins) - 1)
+                    if np.sum(feature_bin_index == i) > 0
+                ]
+            )
+            min_count = max(min_count, balance_features_min_count)
+            c_data_balanced = []
+            feature_values_balanced = []
+            for i in range(len(bins) - 1):
+                bin_indices = np.where(feature_bin_index == i)[0]
+                if len(bin_indices) == 0:
+                    continue
+                selected_indices = np.random.choice(
+                    bin_indices, size=min(min_count, len(bin_indices)), replace=False
+                )
+                c_data_balanced.append(c_data[selected_indices])
+                feature_values_balanced.append(feature_values[selected_indices])
+            c_data = np.vstack(c_data_balanced)
+            feature_values = np.vstack(feature_values_balanced)
+
+        elif (
+            balance_features and feature_values.ndim > 1 and feature_values.shape[1] > 1
+        ):
+            bins_1 = np.linspace(
+                np.min(feature_values[:, 0]),
+                np.max(feature_values[:, 0]),
+                balance_features_bins + 1,
+            )
+            bins_2 = np.linspace(
+                np.min(feature_values[:, 1]),
+                np.max(feature_values[:, 1]),
+                balance_features_bins + 1,
+            )
+            feature_bin_index_1 = np.digitize(feature_values[:, 0], bins_1) - 1
+            feature_bin_index_2 = np.digitize(feature_values[:, 1], bins_2) - 1
+            feature_bin_index = feature_bin_index_1 * len(bins_2) + feature_bin_index_2
+            min_count = min(
+                [
+                    np.sum(feature_bin_index == i)
+                    for i in range(np.max(feature_bin_index) + 1)
+                    if np.sum(feature_bin_index == i) > 0
+                ]
+            )
+            min_count = max(min_count, balance_features_min_count)
+            c_data_balanced = []
+            feature_values_balanced = []
+            for i in range(np.max(feature_bin_index) + 1):
+                bin_indices = np.where(feature_bin_index == i)[0]
+                if len(bin_indices) == 0:
+                    continue
+                selected_indices = np.random.choice(
+                    bin_indices, size=min(min_count, len(bin_indices)), replace=False
+                )
+                c_data_balanced.append(c_data[selected_indices])
+                feature_values_balanced.append(feature_values[selected_indices])
+            c_data = np.vstack(c_data_balanced)
+            feature_values = np.vstack(feature_values_balanced)
+
         self.decoder_model.fit(c_data, feature_values)
         self.decode_pca = pca
+        self.decode_dim = decode_dim
 
     def predict_decoder(self, interval, interpolate=False, smooth_context: int = None):
         self._check_embedded_data()
@@ -785,6 +942,8 @@ class C3poAnalysis:
             t_data, c_data = self._select_data(
                 self.decode_pca, interpolated=interpolate
             )
+
+        c_data = c_data[:, self.decode_dim]
 
         ind = np.where(np.logical_and(t_data >= interval[0], t_data <= interval[1]))[0]
         if len(ind) == 0:
