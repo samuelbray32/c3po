@@ -715,7 +715,11 @@ class C3poAnalysis:
     # decoder tools: Testing decodability of latent factors to known variables
     import sklearn
 
-    def initialize_decoder(self, model_type="knn", **kwargs):
+    def initialize_decoder(
+        self, model_type="knn", feature_prediction_delay=0, **kwargs
+    ):
+        self.feature_prediction_delay = feature_prediction_delay
+        self.decoder_model = None
         if isinstance(model_type, str):
             if model_type == "knn":
                 from sklearn.neighbors import KNeighborsRegressor
@@ -747,19 +751,22 @@ class C3poAnalysis:
         balance_features_bins=10,
         balance_features_min_count: int = 50,
     ):
-        self._check_embedded_data()
+        if self.decoder_model is None:
+            raise ValueError("Decoder model not initialized")
 
+        # get context data
+        self._check_embedded_data()
         if smooth_context:
             t_data, c_data = self._smooth_context(
                 pca=pca, interpolated=interpolate, sigma=smooth_context
             )
         else:
             t_data, c_data = self._select_data(pca, interpolated=interpolate)
-
         c_data = c_data[:, decode_dim]
 
-        if self.decoder_model is None:
-            raise ValueError("Decoder model not initialized")
+        # Get feature data
+        feature_times = feature_times.copy() - self.feature_prediction_delay
+
         if intervals is None:
             intervals = np.array([[t_data[0], t_data[-1]]])
 
@@ -784,78 +791,6 @@ class C3poAnalysis:
         feature_times = feature_times[ind]
         feature_values = feature_values[ind]
 
-        # feature_times = feature_times[np.logical_and(ind >= 0, ind < t_data.shape[0])]
-        # feature_values = feature_values[np.logical_and(ind >= 0, ind < t_data.shape[0])]
-
-        # ind = ind[
-        #     np.logical_and(
-        #         ~np.isnan(c_data[ind]).any(axis=1),
-        #         ~np.isnan(feature_values).any(axis=1),
-        #     )
-        # ]
-        # feature_times = feature_times[
-        #     np.logical_and(
-        #         ~np.isnan(c_data[ind]).any(axis=1),
-        #         ~np.isnan(feature_values).any(axis=1),
-        #     )
-        # ]
-        # feature_values = feature_values[
-        #     np.logical_and(
-        #         ~np.isnan(c_data[ind]).any(axis=1),
-        #         ~np.isnan(feature_values).any(axis=1),
-        #     )
-        # ]
-
-        """
-        BAD
-        # if balance_features:
-        #     if feature_values.ndim > 1 and feature_values.shape[1] > 1:
-        #         context_binned, bins = self.bin_context_by_feature_2d(
-        #             feature_values[:, 0],
-        #             feature_times,
-        #             feature_values[:, 1],
-        #             feature_times,
-        #             bins_1=balance_features_bins,
-        #             bins_2=balance_features_bins,
-        #             valid_intervals=intervals,
-        #             pca=pca,
-        #             interpolated=interpolate,
-        #         )
-        #         context_binned = [c for sublist in context_binned for c in sublist]
-
-        #     else:
-        #         context_binned, bins = self.bin_context_by_feature(
-        #             np.squeeze(feature_values),
-        #             feature_times,
-        #             # bins=balance_features_bins,
-        #             valid_intervals=intervals,
-        #             pca=pca,
-        #             interpolated=interpolate,
-        #         )
-
-        #     min_count = min(
-        #         [len(bin_data) for bin_data in context_binned if len(bin_data) > 0]
-        #     )
-        #     min_count = min(min_count, balance_features_min_count)
-
-        #     c_data_balanced = []
-        #     feature_values_balanced = []
-        #     for i, bin_data in enumerate(context_binned):
-        #         if len(bin_data) == 0:
-        #             continue
-        #         selected_indices = np.random.choice(
-        #             len(bin_data), size=min(min_count, len(bin_data)), replace=False
-        #         )
-        #         c_data_balanced.append(bin_data[selected_indices])
-        #         feature_values_balanced.append(
-        #             np.full(
-        #                 (min_count,) + feature_values.shape[1:],
-        #                 (bins[i] + bins[i + 1]) / 2,
-        #             )
-        #         )
-        #     c_data = np.vstack(c_data_balanced)
-        #     feature_values = np.vstack(feature_values_balanced)
-        """
         if balance_features and (
             feature_values.ndim == 1 or feature_values.shape[1] == 1
         ):
@@ -951,7 +886,9 @@ class C3poAnalysis:
         ind = ind[~np.isnan(c_data[ind]).any(axis=1)]
         if len(ind) == 0:
             return np.array([]), np.array([])
-        return t_data[ind], self.decoder_model.predict(c_data[ind])
+        return t_data[ind] + self.feature_prediction_delay, self.decoder_model.predict(
+            c_data[ind]
+        )
 
     # ----------------------------------------------------------------------------------
     # Utilities
