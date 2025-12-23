@@ -473,23 +473,34 @@ def _make_apply_fn(
 def _make_loss_fn(
     model: Module,
     loss_type: str = "contrastive",
+    l1_penalty: float = None,
 ) -> Callable:
     """Return a jittable loss that does not close over changing Python objects."""
     apply_fn = _make_apply_fn(model)
 
     def loss_fn(params, x, delta_t, rng):
         pos_params, neg_params, z, _c, neg_z = apply_fn(params, x, delta_t, rng)
+        if l1_penalty is not None:
+            l1_loss = l1_penalty * jnp.sum(jnp.abs(_c), axis=-1).mean()
+        else:
+            l1_loss = 0.0
+
         if loss_type == "contrastive":
             # Keep this pure and array-driven; no Python branching on data.
-            return model.contrastive_loss(
-                pos_params,
-                neg_params,
-                delta_t,
-                z[:, model.predicted_sequence_length :],
-                neg_z,
+            return (
+                model.contrastive_loss(
+                    pos_params,
+                    neg_params,
+                    delta_t,
+                    z[:, model.predicted_sequence_length :],
+                    neg_z,
+                )
+                + l1_loss
             )
         elif loss_type == "mle":
-            return model.mle_loss(pos_params, neg_params, delta_t, rand_key=rng)
+            return (
+                model.mle_loss(pos_params, neg_params, delta_t, rand_key=rng) + l1_loss
+            )
         else:
             raise ValueError("Unknown loss_type")
 
@@ -511,6 +522,7 @@ def train_model(
     max_n_neg=256,
     min_batch_size=4,
     multi_gpu=False,
+    l1_penalty=None,
 ):
     """
     Train the C3PO model with adaptive negative sampling and batch size.
@@ -530,6 +542,7 @@ def train_model(
         max_n_neg (int): The maximum number of negative samples.
         min_batch_size (int): The minimum batch size.
         multi_gpu (bool): Whether to use multiple GPUs for training.
+        l1_penalty (float): L1 penalty on context embeddings. If None, no penalty is applied.
 
     Returns:
         params (dict): The trained model parameters.
@@ -549,7 +562,7 @@ def train_model(
     buffer = buffer_size
 
     # create jittable loss and grad functions
-    loss_fn = _make_loss_fn(model, loss_type=loss_type)
+    loss_fn = _make_loss_fn(model, loss_type=loss_type, l1_penalty=l1_penalty)
     if not multi_gpu:
         loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
     else:
@@ -606,7 +619,9 @@ def train_model(
                 n_neg = min(n_neg * 2, max_n_neg)
                 model = update_n_neg(model, n_neg)
                 # update the training functions
-                loss_fn = _make_loss_fn(model, loss_type=loss_type)
+                loss_fn = _make_loss_fn(
+                    model, loss_type=loss_type, l1_penalty=l1_penalty
+                )
                 if not multi_gpu:
                     del loss_grad_fn  # free memory
                     jax.clear_caches()
@@ -626,7 +641,9 @@ def train_model(
                 n_neg = max(initial_n_neg, max_n_neg // 8)
                 model = update_n_neg(model, n_neg)
                 # update the training functions
-                loss_fn = _make_loss_fn(model, loss_type=loss_type)
+                loss_fn = _make_loss_fn(
+                    model, loss_type=loss_type, l1_penalty=l1_penalty
+                )
                 if not multi_gpu:
                     del loss_grad_fn  # free memory
                     jax.clear_caches()
