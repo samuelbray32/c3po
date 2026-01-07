@@ -24,7 +24,12 @@ In the case of enumerable ordinal mark features where $\bar S$ can be calculated
 
 ## Contrastive Loss
 
-In our case where $Z$ is a continuous feature vector, the MLE approach is limited by our ability to estimate $\bar S$. This is because 1. in high-density neural data there are up to thousands of emission sources to sample and 2. sampling of marks across Z will be biased towards high-firing rate regions of the space.  Instead we derive an alternative loss function using Noise Contrastive Estimation (NCE) [CITE].
+In our case where $Z$ is a continuous feature vector, the MLE approach is limited by our ability to estimate $\bar S$. This is because:
+
+1. In high-density neural data there are up to thousands of emission sources to sample and
+2. Sampling of marks across Z will be biased towards high-firing rate regions of the space.
+
+Instead we derive an alternative loss function using Noise Contrastive Estimation (NCE) [CITE].
 
 Consider a collection of marks including both the true value $Z_i$ and $m$ false events from elsewhere in the data to make a 'bag' of samples:
 $$ M = \set{Z_i} \cup\set{Z_j}_{j=1}^m$$
@@ -47,7 +52,7 @@ $$p(Z_i=true) = \frac{H_i\bar S / (H'_i\bar S')}{\sum_jH_j\bar S / (H'_j\bar S')
 Our loss for training is then:
 $$\mathcal{L} = -\log p(Z_i = true) = -\log(H_i/H'_i) + \log\sum_j(H_j/H'_j)$$
 
-Beacuse all samples share the same probabilistic dependence on the lack of prior events ($\bar S$) this term becomes irrelevant to the contrastive question. This is critical as we no longer need to (poorly) approximate it across our continuous mark space $Z$. In this case, increasing the number of negative samples in $M$ increases the _difficulty_ of identifying the true sample $Z_i$ (and can therfore help to refine the model), but the loss equation is made no more or less _accurate_ by doing so.
+Because all samples share the same probabilistic dependence on the lack of prior events ($\bar S$) this term becomes irrelevant to the contrastive question. This is critical as we no longer need to (poorly) approximate it across our continuous mark space $Z$. In this case, increasing the number of negative samples in $M$ increases the _difficulty_ of identifying the true sample $Z_i$ (and can therfore help to refine the model), but the loss equation is made no more or less _accurate_ by doing so.
 
 Similarly, as can be seen in eqn. xxx, any multiplicative factor in $H$ or $H'$ that is constant with respect to $Z$ is negated within the loss. This is relevant to bear in mind when designing hazard models as we will see below.
 
@@ -60,7 +65,7 @@ We first consider the case wher the hazard function has no dependence on the emb
 As mentioned above, any constant factor in the hazard function can be safely ignored, meaning we can specify $H'(\Delta t_i | C_{i-1}) = 1$ with no loss of generality. This results in the loss function:
 $$\mathcal{L} = -\log p(Z_i = true) = -\log H_i + \log\sum_jH_j$$
 
-While this case does not make the best use of the model expressivity, we mention it to highlite an interesting equivalency.  We take the additional assumption that the true hazard model is indepent of the delay time ($H(Z_j,\Delta t |C_{i-1}) = H(Z_j |C_{i-1})$). This case can occur if assuming a Poisson emission model _or_ if all marks are evenly spaced in time (therfore making $\Delta t$) a constant rather than a variable).
+While this case does not make the best use of the model expressivity, we mention it to highlite an interesting equivalency.  We take the additional assumption that the true hazard model is indepent of the delay time ($H(Z_j,\Delta t |C_{i-1}) = H(Z_j |C_{i-1})$). This case can occur if assuming a Poisson emission model _or_ if all marks are evenly spaced in time (therefore making $\Delta t$) a constant rather than a variable).
 
 The later matches the modeling conditions used for Contrastive Predictive Coding (CPC) for unsupervised representation learning of a resularly sampled timeseries [Oord et. al 2019]. Accordingly, replacing $H(Z_j | C_{i-1})$ with $f(Z_j | C_{i-1})$ exactly reproduces the loss function dervied in the paper (cited eqn. 4).
 
@@ -72,4 +77,7 @@ $$H'_j = e^{-(||Z_j||_{k})^k}$$
 
 Intuitively, this alternative model serves to regularize the embedded space during the training process. For a given embedded mark $Z_j$ on timepoints {$i\neq j$} where it is included in the negative sample $M$, the gradient will push the mark embedding to minimize it's norm value.
 
-Empirically, we have found that using a 2-norm in this hazard function performs well in stabilizing and speeding the training process.
+Empirically, we have found that using a 2-norm in this hazard function performs well in stabilizing and speeding the training process. This alternative model will cause non-informative spike events to map near the origin of the embedded mark space.  To demonstrate this, we ran an alternative version of the toy model where the spikes times
+for 25% of the neurons were randomly distributed across the latent generative phase.
+This amounted to waveforms emitted from these neuron spikes being both unpredictable from
+past events and uninformitive for prediction of future events. The lack of statistical information between the spike history and these "noisy" neurons resulted in their waveforms mapping to the origin of the embedded space to intead optimize their liklihood under the alternative model (Fig 1xxx).
