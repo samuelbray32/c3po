@@ -20,6 +20,7 @@ from .context import context_factory
 from .rate_prediction import rate_prediction_factory
 from .process_models import distribution_dictionary
 from .util import DilatedCausalConv1D, chunked_logsumexp
+from .bidirectional_model import BidirectionalC3PO
 
 
 class Embedding(nn.Module):
@@ -548,6 +549,10 @@ def train_model(
         params (dict): The trained model parameters.
         tracked_loss (list): The tracked loss values over epochs.
     """
+    # Check inputs
+    if np.min(delta_t_train) <= 0:
+        raise ValueError("All delta_t values must be positive.")
+
     # prepare the optimizer and model for training
     if optimizer is None:
         optimizer = optax.chain(
@@ -858,6 +863,10 @@ def train_epoch_multi_gpu(
                 delta_t_batch,
                 jax.random.split(rand_key, num_devices),
             )
+
+            if not np.isfinite(loss_val.mean()):
+                raise ValueError("Loss is not finite")
+
             epoch_loss.append(loss_val.mean())
 
             j += total_batch_size
@@ -884,7 +893,9 @@ def update_n_neg(model, new_n_neg):
     Returns:
         C3PO: The updated model.
     """
-    new_model = C3PO(
+    model_class = BidirectionalC3PO if isinstance(model, BidirectionalC3PO) else C3PO
+
+    new_model = model_class(
         encoder_args=model.encoder_args,
         context_args=model.context_args,
         rate_args=model.rate_args,

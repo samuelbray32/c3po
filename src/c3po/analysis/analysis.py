@@ -11,6 +11,7 @@ from typing import Tuple, List
 from flax import serialization
 
 from ..model.model import Embedding, C3PO
+from ..model.bidirectional_model import BidirectionalC3PO
 
 
 def interval_list_contains_ind(interval_list, timestamps):
@@ -124,7 +125,10 @@ class C3poAnalysis:
             sample_params=None,
         )
 
-        model = C3PO(**model_args)
+        if entry.get("context_args").get("context_model", None) == "bidirectional_c3po":
+            model = BidirectionalC3PO(**model_args)
+        else:
+            model = C3PO(**model_args)
 
         x_ = np.zeros((1, 100, entry["input_shape"]))
         if entry["encoder_args"].get("input_format", None) == "indices":
@@ -199,9 +203,12 @@ class C3poAnalysis:
 
         @jax.jit
         def embed_chunk(x, delta_t):
-            return Embedding(
+            z, c = Embedding(
                 self.encoder_args, self.context_args, self.latent_dim, self.context_dim
             ).apply(self.embedding_params, x, delta_t, jax.random.PRNGKey(0))
+            if isinstance(c, tuple):
+                c = c[0]  # take forward context only
+            return z, c
 
         i = chunk_padding
 
@@ -267,13 +274,15 @@ class C3poAnalysis:
     # ----------------------------------------------------------------------------------
     # PCA projection
 
-    def fit_context_pca(self, fit_intervals=None):
+    def fit_context_pca(self, fit_intervals=None, interpolated=False):
         self._check_embedded_data()
         if fit_intervals is None:
             fit_intervals = np.array([[self.t[0], self.t[-1]]])
 
-        fit_ind = interval_list_contains_ind(fit_intervals, self.t)
-        data = self.c[fit_ind]
+        t, data = self._select_data(pca=False, interpolated=interpolated)
+
+        fit_ind = interval_list_contains_ind(fit_intervals, t)
+        data = data[fit_ind]
         data = data[~np.isnan(data).any(axis=1)]
         pca = PCA(n_components=self.context_dim)
         pca.fit(data)

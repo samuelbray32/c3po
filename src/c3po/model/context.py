@@ -54,6 +54,10 @@ def context_factory(context_model: str, context_dim: int, **kwargs):
     elif context_model == "multi_model":
         kwargs.pop("infer_init", None)
         return MultiModelContext(context_dim=context_dim, **kwargs)
+    elif context_model == "bidirectional_c3po":
+        kwargs.pop("infer_init", None)
+        return BidirectionalC3POContext(context_dim=context_dim, **kwargs)
+
     else:
         raise ValueError(f"Unknown context model: {context_model}")
 
@@ -79,6 +83,26 @@ class BaseContext(nn.RNNCellBase):
     @property
     def num_feature_axes(self):
         return 1
+
+
+class BidirectionalC3POContext(nn.Module):
+    context_dim: int
+    forward_model_args: dict
+    backward_model_args: dict
+
+    def setup(self):
+        self.forward_model = context_factory(
+            context_dim=self.context_dim, **self.forward_model_args
+        )
+        self.backward_model = context_factory(
+            context_dim=self.context_dim, **self.backward_model_args
+        )
+
+    def __call__(self, z):
+        c_forward = self.forward_model(z)
+        c_backward = self.backward_model(jnp.flip(z, axis=1))
+        c_backward = jnp.flip(c_backward, axis=1)
+        return (c_forward, c_backward)
 
 
 class MultiModelContext(nn.Module):
