@@ -20,7 +20,6 @@ from .context import context_factory
 from .rate_prediction import rate_prediction_factory
 from .process_models import distribution_dictionary
 from .util import DilatedCausalConv1D, chunked_logsumexp
-from .bidirectional_model import BidirectionalC3PO
 
 
 class Embedding(nn.Module):
@@ -893,6 +892,8 @@ def update_n_neg(model, new_n_neg):
     Returns:
         C3PO: The updated model.
     """
+    from .bidirectional_model import BidirectionalC3PO  # avoid circular import
+
     model_class = BidirectionalC3PO if isinstance(model, BidirectionalC3PO) else C3PO
 
     new_model = model_class(
