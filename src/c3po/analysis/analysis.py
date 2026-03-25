@@ -503,6 +503,8 @@ class C3poAnalysis:
         pca=False,
         interpolated=False,
         return_counts=False,
+        jitter_feature_sigma=None,
+        jitter_feature_n=None,
     ):
         """
         Bin the context by co-occurring feature values
@@ -544,6 +546,73 @@ class C3poAnalysis:
                 np.max(feature_2[ind_feature_2]),
                 n_bins_2,
             )
+
+        if jitter_feature_sigma is not None and jitter_feature_n is not None:
+            if isinstance(jitter_feature_sigma, (int, float)):
+                jitter_1 = jitter_feature_sigma
+                jitter_2 = jitter_feature_sigma
+            elif (
+                isinstance(jitter_feature_sigma, (list, tuple))
+                and len(jitter_feature_sigma) == 2
+            ):
+                jitter_1 = jitter_feature_sigma[0]
+                jitter_2 = jitter_feature_sigma[1]
+
+            context_binned, bins_1, bins_2, counts = self.bin_context_by_feature_2d(
+                feature_1,
+                feature_1_times,
+                feature_2,
+                feature_2_times,
+                bins_1,
+                bins_2,
+                valid_intervals,
+                pca,
+                interpolated,
+                return_counts=True,
+                jitter_feature_sigma=None,
+                jitter_feature_n=None,
+            )
+
+            for i in tqdm(
+                range(jitter_feature_n),
+                desc="Jittering features and re-binning context",
+            ):
+                feature_1_i = feature_1 + np.random.normal(
+                    0, jitter_1, size=feature_1.shape
+                )
+                feature_2_i = feature_2 + np.random.normal(
+                    0, jitter_2, size=feature_2.shape
+                )
+                context_binned_i, _, __, counts = self.bin_context_by_feature_2d(
+                    feature_1_i,
+                    feature_1_times,
+                    feature_2_i,
+                    feature_2_times,
+                    bins_1,
+                    bins_2,
+                    valid_intervals,
+                    pca,
+                    interpolated,
+                    return_counts=True,
+                    jitter_feature_sigma=None,
+                    jitter_feature_n=None,
+                )
+                for b1 in range(len(bins_1)):
+                    for b2 in range(len(bins_2)):
+                        if len(context_binned_i[b1][b2]) == 0:
+                            continue
+                        if len(context_binned[b1][b2]) == 0:
+                            context_binned[b1][b2] = context_binned_i[b1][b2]
+                        else:
+                            context_binned[b1][b2] = np.concatenate(
+                                [context_binned[b1][b2], context_binned_i[b1][b2]]
+                            )
+                        counts[b1, b2] += counts[b1, b2]
+
+            if return_counts:
+                return context_binned, bins_1, bins_2, counts
+            else:
+                return context_binned, bins_1, bins_2
 
         ind_context = interval_list_contains_ind(valid_intervals, t_data)
 
