@@ -20,9 +20,20 @@ class DiscretizedRegression:
             self.discretizer = KBinsDiscretizer(
                 n_bins=n_bins, encode="ordinal", strategy=bin_strategy
             )
+        self.n_bins = n_bins  # stored for copy
+        self.bin_strategy = bin_strategy  # stored for copy
         self.multidim = multidim
         self.model = LogisticRegression(max_iter=max_iter)
         self.balance_groups = balance_groups
+
+    def copy(self):
+        return DiscretizedRegression(
+            n_bins=self.n_bins,
+            bin_strategy=self.bin_strategy,
+            max_iter=self.model.max_iter,
+            balance_groups=self.balance_groups,
+            multidim=self.multidim,
+        )
 
     def fit(self, X, y):
         print(np.nanmin(y), np.nanmax(y))
