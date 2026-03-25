@@ -6,12 +6,14 @@ import jax
 from functools import lru_cache
 from multiprocessing import Pool
 from scipy.signal import correlate
-from typing import Tuple, List
+from typing import Tuple, List, Union
 
 from flax import serialization
 
 from ..model.model import Embedding, C3PO
 from ..model.bidirectional_model import BidirectionalC3PO
+
+figure_directory = "/home/sambray/Documents/c3po/Figures/"
 
 
 def interval_list_contains_ind(interval_list, timestamps):
@@ -30,6 +32,7 @@ def interval_list_contains_ind(interval_list, timestamps):
                 np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
             )
         ).tolist()
+    ind = np.unique(ind)
     return np.asarray(ind)
 
 
@@ -49,7 +52,59 @@ def interval_list_contains(interval_list, timestamps):
                 np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
             )
         ).tolist()
+    ind = np.unique(ind)
     return timestamps[ind]
+
+
+def interval_list_intersect(interval_list_1, interval_list_2):
+    """Find the intersection of two interval lists.
+
+    Parameters
+    ----------
+    interval_list_1 : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    interval_list_2 : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    """
+    intersected_intervals = []
+    for interval_1 in interval_list_1:
+        for interval_2 in interval_list_2:
+            start = max(interval_1[0], interval_2[0])
+            end = min(interval_1[1], interval_2[1])
+            if start < end:
+                intersected_intervals.append((start, end))
+    intersect = np.array(intersected_intervals)
+    if intersect.ndim == 1:
+        intersect = intersect[None, :]
+    return intersect
+
+
+def interval_list_complement(intervals1, intervals2):
+    """
+    Finds intervals in intervals1 that are not in intervals2
+    Parameters
+    ----------
+    min_length : float, optional
+        Minimum interval length in seconds. Defaults to 0.0.
+    """
+    result = []
+    for start1, end1 in intervals1:
+        subtracted = [(start1, end1)]
+        for start2, end2 in intervals2:
+            new_subtracted = []
+            for s, e in subtracted:
+                if start2 <= s and e <= end2:
+                    continue
+                if e <= start2 or end2 <= s:
+                    new_subtracted.append((s, e))
+                    continue
+                if start2 > s:
+                    new_subtracted.append((s, start2))
+                if end2 < e:
+                    new_subtracted.append((end2, e))
+            subtracted = new_subtracted
+        result.extend(subtracted)
+    return np.array(result)
 
 
 class C3poAnalysis:
@@ -304,8 +359,65 @@ class C3poAnalysis:
             self.c_pca_interp[ind_valid] = self.pca.transform(self.c_interp[ind_valid])
 
     # ----------------------------------------------------------------------------------
+    # manual projection
+
+    projected_context = dict()
+
+    def add_projection(
+        self, name: str, projection_vector: np.ndarray, from_pca: bool = True
+    ):
+        """Add a manual projection of the context.
+
+        Args:
+            name (str): Name of the projection.
+            projection_vector (np.ndarray): Projection vector. Shape (context_dim,).
+            from_pca (bool, optional): Whether the projection vector is in PCA space. Defaults to True.
+        """
+        if from_pca:
+            if self.pca is None:
+                raise ValueError("pca must first be fit to data")
+            projected_data = self.c_pca @ projection_vector
+            projected_data_interp = self.c_pca_interp @ projection_vector
+
+        else:
+            projected_data = self.c @ projection_vector
+            projected_data_interp = self.c_interp @ projection_vector
+
+        self.projected_context[name] = dict(
+            vector=projection_vector,
+            from_pca=from_pca,
+            data=projected_data[:, None],
+            data_interp=projected_data_interp[:, None],
+        )
+
+    def get_projection(self, name: str, interpolated: bool = False):
+        """Get a manual projection of the context.
+
+        Args:
+            name (str): Name of the projection.
+
+        Returns:
+            np.ndarray: Projected data. Shape (n_samples,).
+        """
+        if name not in self.projected_context:
+            raise ValueError(f"Projection {name} not found.")
+        if interpolated:
+            return self.projected_context[name]["data_interp"]
+        return self.projected_context[name]["data"]
+
+    # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
-    def _select_data(self, pca, interpolated):
+    def _select_data(self, pca, interpolated, projection_name=None):
+        if projection_name is not None:
+            if projection_name not in self.projected_context:
+                raise ValueError(f"Projection {projection_name} not found.")
+            if interpolated:
+                t_data = self.t_interp
+                c_data = self.projected_context[projection_name]["data_interp"]
+            else:
+                t_data = self.t
+                c_data = self.projected_context[projection_name]["data"]
+            return t_data, c_data
         if pca and interpolated:
             t_data = self.t_interp
             c_data = self.c_pca_interp
@@ -330,6 +442,7 @@ class C3poAnalysis:
         pca=False,
         interpolated=False,
         alt_data=None,
+        projection_name=None,
     ):
         """
         Bin the context by co-occurring feature values
@@ -343,7 +456,9 @@ class C3poAnalysis:
         """
         if alt_data is None:
             self._check_embedded_data()
-            t_data, c_data = self._select_data(pca, interpolated)
+            t_data, c_data = self._select_data(
+                pca, interpolated, projection_name=projection_name
+            )
         else:
             t_data, c_data = alt_data
 
@@ -505,6 +620,8 @@ class C3poAnalysis:
         t_plot: tuple[float, float],
         pca=True,
         passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        projection_name: Optional[str] = None,
+        smooth_context: bool = False,
     ):
         """
         Look at the model "response function" around the mark times
@@ -524,10 +641,21 @@ class C3poAnalysis:
                 self.interpolate_context()
                 self.embed_context_pca()
 
-            c_data = self.c_pca_interp if pca else self.c_interp
-            t_data = self.t_interp
+            if smooth_context:
+                t_data, c_data = self._smooth_context(
+                    pca=pca, interpolated=True, sigma=smooth_context
+                )
+
+            # c_data = self.c_pca_interp if pca else self.c_interp
+            # t_data = self.t_interp
+            t_data, c_data = self._select_data(
+                pca=pca, interpolated=True, projection_name=projection_name
+            )
         else:
             c_data, t_data = passed_data
+
+        if len(c_data.shape) == 1:
+            c_data = c_data[:, None]
 
         dt = np.median(np.diff(t_data))
         window = int(t_plot[0] / dt), int(t_plot[1] / dt)
@@ -572,7 +700,16 @@ class C3poAnalysis:
             intervals (np.ndarray, optional): Time intervals to compute the power spectrum for. Defaults to None.
             fs (float, optional): Sampling frequency. Defaults to 500.0.
             pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
+            nfft (int, optional): Number of points to use for the FFT. Defaults to 10000.
+            sourced_data (Optional[Tuple[np.ndarray, np.ndarray]], optional):
+                Tuple of (timestamps, context) to use instead of the embedded data. Defaults to None.
 
+        Returns:
+        -------
+            frequencies (np.ndarray): Frequencies of the power spectrum.
+            mid (np.ndarray): Median power spectrum across intervals.
+            lo (np.ndarray): 25th percentile power spectrum across intervals.
+            hi (np.ndarray): 75th percentile power spectrum across intervals.
         """
         t, c = (
             self._select_data(pca, interpolated=True)
@@ -727,6 +864,15 @@ class C3poAnalysis:
     def initialize_decoder(
         self, model_type="knn", feature_prediction_delay=0, **kwargs
     ):
+        """
+        Initialize the decoder model to predict feature values from the context.
+
+        Parameters:
+        ----------
+            model_type (str): Type of model to use. Options are "knn", "linear", and "discretized_regression". Defaults to "knn".
+            feature_prediction_delay (float, optional): Time delay to apply to feature times when matching to context. Defaults to 0.
+            **kwargs: Additional keyword arguments to pass to the model constructor.
+        """
         self.feature_prediction_delay = feature_prediction_delay
         self.decoder_model = None
         if isinstance(model_type, str):
@@ -760,6 +906,26 @@ class C3poAnalysis:
         balance_features_bins=10,
         balance_features_min_count: int = 50,
     ):
+        """
+        Fit the decoder model to predict the given feature values from the context.
+
+        Parameters:
+        ----------
+            feature_values (np.ndarray): Feature values to predict. Shape (n_samples, n_features).
+            feature_times (np.ndarray): Times of the feature values. Shape (n_samples,).
+            intervals (np.ndarray, optional): Time intervals to consider for fitting. Defaults to None.
+            pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
+            decode_dim (slice, optional): Dimensions of the context to use for decoding. Defaults to slice(None) (use all dimensions).
+            interpolate (bool, optional): Whether to use interpolated context data. Defaults to False.
+            smooth_context (int, optional): If not None, apply Gaussian smoothing to the context with the given sigma. Defaults to None.
+            balance_features (bool, optional): Whether to balance the feature values across bins. Defaults to False.
+            balance_features_bins (int, optional): Number of bins to use for balancing the feature values. Defaults to 10.
+            balance_features_min_count (int, optional): Minimum number of samples per bin when balancing feature values. Defaults to 50.
+
+        Returns:
+        ----------
+            None
+        """
         if self.decoder_model is None:
             raise ValueError("Decoder model not initialized")
 
@@ -874,6 +1040,18 @@ class C3poAnalysis:
         self.decode_dim = decode_dim
 
     def predict_decoder(self, interval, interpolate=False, smooth_context: int = None):
+        """Predict feature values for the given time interval using the fitted decoder model.
+
+        Parameters:
+        ----------
+            interval (tuple): Time interval to predict for (start, end).
+            interpolate (bool, optional): Whether to use interpolated context data. Defaults to False.
+            smooth_context (int, optional): If not None, apply Gaussian smoothing to the context with the given sigma. Defaults to None.
+        Returns:
+        ----------
+            prediction_times (np.ndarray): Times of the predictions. Shape (n_samples,).
+            predictions (np.ndarray): Predicted feature values. Shape (n_samples, n_features).
+        """
         self._check_embedded_data()
         if self.decoder_model is None:
             raise ValueError("Decoder model not initialized")
@@ -898,6 +1076,100 @@ class C3poAnalysis:
         return t_data[ind] + self.feature_prediction_delay, self.decoder_model.predict(
             c_data[ind]
         )
+
+    def cross_validated_decoding(
+        self,
+        feature_values,
+        feature_times,
+        cross_fold=5,
+        intervals=None,
+        pca=True,
+        decode_dim: slice = slice(None),
+        interpolate=False,
+        smooth_context: int = None,
+        balance_features=False,
+        balance_features_bins=10,
+        balance_features_min_count: int = 50,
+    ):
+        """Method to generate x-fold cross-validated decoding predictions for the given
+        feature values and times. Uses the fit_decoder and predict_decoder methods
+        internally.
+
+        Parameters:
+        ----------
+            feature_values (np.ndarray): Feature values to decode. Shape (n_samples,).
+            feature_times (np.ndarray): Times of the feature values. Shape (n_samples,).
+            cross_fold (int, optional): Number of folds for cross-validation. Defaults to 5.
+            intervals (np.ndarray, optional): Time intervals to use for fitting and predicting. Defaults to None.
+            pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
+
+        Returns:
+        ----------
+            prediction_times (list of np.ndarray): List of time arrays for each fold's predictions.
+            predictions (list of np.ndarray): List of predicted feature values for each fold.
+        """
+
+        if self.decoder_model is None:
+            raise ValueError("Decoder model not initialized")
+
+        if intervals is None:
+            intervals = np.array(
+                [[max(feature_times[0], self.t[0]), min(feature_times[-1], self.t[-1])]]
+            )
+
+        # split the intervals into cross_fold folds
+        interval_length = np.max(intervals) - np.min(intervals)
+        fold_length = interval_length / cross_fold
+        fold_intervals = [
+            np.array(
+                [
+                    [
+                        np.min(intervals) + i * fold_length,
+                        np.min(intervals) + (i + 1) * fold_length,
+                    ]
+                ]
+            )
+            for i in range(cross_fold)
+        ]
+        # predict_intervals = [
+        #     interval_list_intersect(intervals, fold_interval)
+        #     for fold_interval in fold_intervals
+        # ]
+        predict_intervals = fold_intervals
+        fit_intervals = [
+            interval_list_complement(intervals, predict_interval)
+            for predict_interval in predict_intervals
+        ]
+
+        base_decoder = self.decoder_model.copy()
+        predictions = []
+        prediction_times = []
+        for fit_interval, predict_interval in tqdm(
+            zip(fit_intervals, predict_intervals),
+            total=cross_fold,
+            desc="Cross-validating decoder",
+        ):
+            self.decoder_model = base_decoder.copy()
+            self.fit_decoder(
+                feature_values,
+                feature_times,
+                intervals=fit_interval,
+                pca=pca,
+                decode_dim=decode_dim,
+                interpolate=interpolate,
+                smooth_context=smooth_context,
+                balance_features=balance_features,
+                balance_features_bins=balance_features_bins,
+                balance_features_min_count=balance_features_min_count,
+            )
+            t_pred, pred = self.predict_decoder(
+                [predict_interval[0][0], predict_interval[0][1]],
+                interpolate=interpolate,
+                smooth_context=smooth_context,
+            )
+            predictions.append(pred)
+            prediction_times.append(t_pred)
+        return prediction_times, predictions
 
     # ----------------------------------------------------------------------------------
     # Utilities
