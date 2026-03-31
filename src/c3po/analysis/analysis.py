@@ -145,6 +145,8 @@ class C3poAnalysis:
         self.decoder_model = None
         self.decode_pca = None
 
+        self.projected_context = dict()
+
     def copy(self):
         new_analysis = C3poAnalysis(
             model=self.model,
@@ -168,6 +170,8 @@ class C3poAnalysis:
             None if self.decoder_model is None else self.decoder_model
         )
         new_analysis.decode_pca = self.decode_pca
+
+        new_analysis.projected_context = self.projected_context.copy()
 
         return new_analysis
 
@@ -367,8 +371,6 @@ class C3poAnalysis:
 
     # ----------------------------------------------------------------------------------
     # manual projection
-
-    projected_context = dict()
 
     def add_projection(
         self, name: str, projection_vector: np.ndarray, from_pca: bool = True
@@ -590,7 +592,7 @@ class C3poAnalysis:
                 feature_2_i = feature_2 + np.random.normal(
                     0, jitter_2, size=feature_2.shape
                 )
-                context_binned_i, _, __, counts = self.bin_context_by_feature_2d(
+                context_binned_i, _, __, counts_i = self.bin_context_by_feature_2d(
                     feature_1_i,
                     feature_1_times,
                     feature_2_i,
@@ -614,7 +616,7 @@ class C3poAnalysis:
                             context_binned[b1][b2] = np.concatenate(
                                 [context_binned[b1][b2], context_binned_i[b1][b2]]
                             )
-                        counts[b1, b2] += counts[b1, b2]
+                        counts[b1, b2] += counts_i[b1, b2]
 
             if return_counts:
                 return context_binned, bins_1, bins_2, counts
@@ -718,15 +720,19 @@ class C3poAnalysis:
                 self.embed_context_pca()
 
             if smooth_context:
+                if not projection_name is None:
+                    raise NotImplementedError(
+                        "Smoothing not implemented for manual projections yet"
+                    )
                 t_data, c_data = self._smooth_context(
                     pca=pca, interpolated=True, sigma=smooth_context
                 )
-
-            # c_data = self.c_pca_interp if pca else self.c_interp
-            # t_data = self.t_interp
-            t_data, c_data = self._select_data(
-                pca=pca, interpolated=True, projection_name=projection_name
-            )
+            else:
+                # c_data = self.c_pca_interp if pca else self.c_interp
+                # t_data = self.t_interp
+                t_data, c_data = self._select_data(
+                    pca=pca, interpolated=True, projection_name=projection_name
+                )
         else:
             c_data, t_data = passed_data
 
