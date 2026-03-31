@@ -74,18 +74,25 @@ def interval_list_intersect(interval_list_1, interval_list_2):
             if start < end:
                 intersected_intervals.append((start, end))
     intersect = np.array(intersected_intervals)
-    if intersect.ndim == 1:
+    # Handle the empty case explicitly to ensure shape (0, 2)
+    if intersect.size == 0:
+        return np.empty((0, 2), dtype=intersect.dtype)
+    # If there is exactly one interval, ensure shape (1, 2)
+    if intersect.ndim == 1 and intersect.shape[0] == 2:
         intersect = intersect[None, :]
     return intersect
 
 
 def interval_list_complement(intervals1, intervals2):
     """
-    Finds intervals in intervals1 that are not in intervals2
+    Finds intervals in `intervals1` that are not covered by any interval in `intervals2`.
+
     Parameters
     ----------
-    min_length : float, optional
-        Minimum interval length in seconds. Defaults to 0.0.
+    intervals1 : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
+    intervals2 : array_like
+        Each element is (start time, stop time), i.e. an interval in seconds.
     """
     result = []
     for start1, end1 in intervals1:
