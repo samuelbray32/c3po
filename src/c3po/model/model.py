@@ -523,6 +523,8 @@ def train_model(
     min_batch_size=4,
     multi_gpu=False,
     l1_penalty=None,
+    return_intermediate_params=False,
+    return_training_hypers=False,
 ):
     """
     Train the C3PO model with adaptive negative sampling and batch size.
@@ -543,10 +545,14 @@ def train_model(
         min_batch_size (int): The minimum batch size.
         multi_gpu (bool): Whether to use multiple GPUs for training.
         l1_penalty (float): L1 penalty on context embeddings. If None, no penalty is applied.
+        return_intermediate_params (bool): Whether to return the parameters at each epoch.
+        return_training_hypers (bool): Whether to return the training hyperparameters used at each epoch.
 
     Returns:
         params (dict): The trained model parameters.
         tracked_loss (list): The tracked loss values over epochs.
+        intermediate_params (list, optional): The parameters at each epoch if return_intermediate_params is True.
+        training_hypers (list, optional): The training hyperparameters used at each epoch if return_training_hypers is True.
     """
     # Check inputs
     if np.min(delta_t_train) <= 0:
@@ -573,6 +579,8 @@ def train_model(
         # loss_grad_fn = pmap(loss_grad_fn, in_axes=(None, 0, 0, 0))
         train_step_fn = make_multi_gpu_train_step(loss_fn, optimizer)
 
+    intermediate_params = [] if return_intermediate_params else None
+    training_hypers = [] if return_training_hypers else None
     try:
         for i in range(n_epochs):
             # apply one epoch of training
@@ -616,6 +624,12 @@ def train_model(
             # check if stalled
             if np.mean(tracked_loss[-5:-1]) >= tracked_loss[-1] * 1.01:
                 continue  # still improving
+
+            # store checkpoints when stalled
+            if return_intermediate_params:
+                intermediate_params.append(params.copy())
+            if return_training_hypers:
+                training_hypers.append({"batch_size": batch_size, "n_neg": n_neg})
 
             # stalled, try to increase n_neg
             if n_neg < max_n_neg:
@@ -670,6 +684,12 @@ def train_model(
     except KeyboardInterrupt:
         print("Training interrupted by user.")
 
+    if return_training_hypers and return_intermediate_params:
+        return params, tracked_loss, intermediate_params, training_hypers
+    elif return_training_hypers:
+        return params, tracked_loss, training_hypers
+    if return_intermediate_params:
+        return params, tracked_loss, intermediate_params
     return params, tracked_loss
 
 
