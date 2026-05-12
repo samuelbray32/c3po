@@ -6,7 +6,7 @@ import jax
 from functools import lru_cache
 from multiprocessing import Pool
 from scipy.signal import correlate
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Optional
 
 from flax import serialization
 
@@ -14,6 +14,20 @@ from ..model.model import Embedding, C3PO
 from ..model.bidirectional_model import BidirectionalC3PO
 
 figure_directory = "/home/sambray/Documents/c3po/Figures/"
+
+
+def _is_sorted(arr):
+    return np.all(arr[:-1] <= arr[1:])
+
+
+def _interval_list_contains_ind_sorted(interval_list, timestamps):
+    ind = []
+    for interval in interval_list:
+        st = np.searchsorted(timestamps, interval[0], side="left")
+        en = np.searchsorted(timestamps, interval[1], side="right")
+        ind += list(range(st, en))
+    ind = np.unique(ind)
+    return np.asarray(ind)
 
 
 def interval_list_contains_ind(interval_list, timestamps):
@@ -26,6 +40,8 @@ def interval_list_contains_ind(interval_list, timestamps):
     timestamps : array_like
     """
     ind = []
+    if _is_sorted(timestamps):
+        return _interval_list_contains_ind_sorted(interval_list, timestamps)
     for interval in interval_list:
         ind += np.ravel(
             np.argwhere(
@@ -45,14 +61,9 @@ def interval_list_contains(interval_list, timestamps):
         Each element is (start time, stop time), i.e. an interval in seconds.
     timestamps : array_like
     """
-    ind = []
-    for interval in interval_list:
-        ind += np.ravel(
-            np.argwhere(
-                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
-            )
-        ).tolist()
-    ind = np.unique(ind)
+    ind = interval_list_contains_ind(interval_list, timestamps)
+    if len(ind) == 0:
+        return np.array([])
     return timestamps[ind]
 
 
@@ -514,6 +525,7 @@ class C3poAnalysis:
         return_counts=False,
         jitter_feature_sigma=None,
         jitter_feature_n=None,
+        passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ):
         """
         Bin the context by co-occurring feature values
@@ -525,19 +537,29 @@ class C3poAnalysis:
             feature_2_times (np.ndarray): Times of the feature values. Shape (n_samples,).
             bins (int, optional): Number of bins to use. Defaults to None.
             valid_intervals (np.ndarray, optional): Intervals to consider. Defaults to None.
+
+        Returns:
+            context_binned (list of list of np.ndarray): Binned context. Shape (n_bins_1, n_bins_2).
+            bins_1 (np.ndarray): Bin edges for feature 1. Shape (n_bins_1,).
+            bins_2 (np.ndarray): Bin edges for feature 2. Shape (n_bins_2,).
         """
         # select and parse data
-        self._check_embedded_data()
-        t_data, c_data = self._select_data(pca, interpolated)
-        if valid_intervals is None:
-            valid_intervals = np.array(
-                [
+        if passed_data is not None:
+            t_data, c_data = passed_data
+        else:
+            self._check_embedded_data()
+            t_data, c_data = self._select_data(pca, interpolated)
+            if valid_intervals is None:
+                valid_intervals = np.array(
                     [
-                        np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
-                        np.min([feature_1_times[-1], feature_2_times[-1], t_data[-1]]),
+                        [
+                            np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
+                            np.min(
+                                [feature_1_times[-1], feature_2_times[-1], t_data[-1]]
+                            ),
+                        ]
                     ]
-                ]
-            )
+                )
 
         if bins_1 is None or isinstance(bins_1, int):
             n_bins_1 = 30 if bins_1 is None else bins_1
