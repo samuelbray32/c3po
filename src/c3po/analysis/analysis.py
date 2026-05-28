@@ -351,7 +351,7 @@ class C3poAnalysis:
     # ----------------------------------------------------------------------------------
     # PCA projection
 
-    def detrend_context(self, method="linear", intervals=None):
+    def detrend_context(self, method="projection", intervals=None):
         """Method to remove slow-timescale changes in context"""
         self._check_embedded_data()
         if method == "linear":
@@ -359,6 +359,11 @@ class C3poAnalysis:
             self.c_pca_interp = None
             self.pca = None
             self.linear_detrend(intervals=intervals)
+        elif method == "projection":
+            self.c_pca = None
+            self.c_pca_interp = None
+            self.pca = None
+            self.proj_detrend(fit_intervals=intervals)
 
         else:
             raise ValueError(f"Detrending method {method} not supported.")
@@ -369,11 +374,28 @@ class C3poAnalysis:
         ind = interval_list_contains_ind(intervals, self.t)
         fit_detrend = np.zeros_like(self.c)
         for i in range(self.context_dim):
-            fit_detrend[ind, i] = np.polyval(
+            fit_detrend[:, i] = np.polyval(
                 np.polyfit(self.t[ind], self.c[ind, i], deg=1), self.t
             )
         self.c = self.c - fit_detrend
         return
+
+    def proj_detrend(self, fit_intervals=None):
+        if fit_intervals is None:
+            fit_intervals = np.array([[self.t[0], self.t[-1]]])
+        t, data = self._select_data(pca=False, interpolated=False)
+        fit_ind = interval_list_contains_ind(fit_intervals, t)
+        data = data[fit_ind]
+        t = t[fit_ind]
+        ind_valid = ~np.isnan(data).any(axis=1)
+        data = data[ind_valid]
+        t = t[ind_valid]
+        # get the projection axis
+        axis = np.polyfit(t, data, deg=1)[0]
+        axis = axis / np.linalg.norm(axis)
+        # project out the axis
+        projection = self.c @ axis
+        self.c = self.c - np.outer(projection, axis)
 
     def fit_context_pca(self, fit_intervals=None, interpolated=False):
         self._check_embedded_data()
