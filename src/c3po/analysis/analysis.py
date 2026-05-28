@@ -351,6 +351,30 @@ class C3poAnalysis:
     # ----------------------------------------------------------------------------------
     # PCA projection
 
+    def detrend_context(self, method="linear", intervals=None):
+        """Method to remove slow-timescale changes in context"""
+        self._check_embedded_data()
+        if method == "linear":
+            self.c_pca = None
+            self.c_pca_interp = None
+            self.pca = None
+            self.linear_detrend(intervals=intervals)
+
+        else:
+            raise ValueError(f"Detrending method {method} not supported.")
+
+    def linear_detrend(self, intervals=None):
+        if intervals is None:
+            intervals = np.array([[self.t[0], self.t[-1]]])
+        ind = interval_list_contains_ind(intervals, self.t)
+        fit_detrend = np.zeros_like(self.c)
+        for i in range(self.context_dim):
+            fit_detrend[ind, i] = np.polyval(
+                np.polyfit(self.t[ind], self.c[ind, i], deg=1), self.t
+            )
+        self.c = self.c - fit_detrend
+        return
+
     def fit_context_pca(self, fit_intervals=None, interpolated=False):
         self._check_embedded_data()
         if fit_intervals is None:
