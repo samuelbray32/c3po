@@ -965,6 +965,8 @@ class C3poAnalysis:
     # decoder tools: Testing decodability of latent factors to known variables
     import sklearn
 
+    _decoder_kwargs = None
+
     def initialize_decoder(
         self, model_type="knn", feature_prediction_delay=0, **kwargs
     ):
@@ -977,6 +979,11 @@ class C3poAnalysis:
             feature_prediction_delay (float, optional): Time delay to apply to feature times when matching to context. Defaults to 0.
             **kwargs: Additional keyword arguments to pass to the model constructor.
         """
+        store_kwargs = locals()
+        store_kwargs.pop("self")
+        store_kwargs.update(store_kwargs.pop("kwargs"))
+        self._decoder_kwargs = store_kwargs
+
         self.feature_prediction_delay = feature_prediction_delay
         self.decoder_model = None
         if isinstance(model_type, str):
@@ -1244,8 +1251,6 @@ class C3poAnalysis:
             interval_list_complement(intervals, predict_interval)
             for predict_interval in predict_intervals
         ]
-
-        base_decoder = self.decoder_model.copy()
         predictions = []
         prediction_times = []
         for fit_interval, predict_interval in tqdm(
@@ -1253,7 +1258,9 @@ class C3poAnalysis:
             total=cross_fold,
             desc="Cross-validating decoder",
         ):
-            self.decoder_model = base_decoder.copy()
+            self.initialize_decoder(
+                **self._decoder_kwargs
+            )  # Re-initialize the decoder with the original parameters
             self.fit_decoder(
                 feature_values,
                 feature_times,
