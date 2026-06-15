@@ -545,7 +545,7 @@ def train_model(
         min_batch_size (int): The minimum batch size.
         multi_gpu (bool): Whether to use multiple GPUs for training.
         l1_penalty (float): L1 penalty on context embeddings. If None, no penalty is applied.
-        return_intermediate_params (bool): Whether to return the parameters at each epoch.
+        return_intermediate_params (bool): Whether to return the parameters at each stall point.
         return_training_hypers (bool): Whether to return the training hyperparameters used at each epoch.
 
     Returns:
