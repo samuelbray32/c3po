@@ -1,3 +1,4 @@
+from sklearn.neighbors import KNeighborsRegressor
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.linear_model import LogisticRegression
 import numpy as np
@@ -83,11 +84,16 @@ class DiscretizedRegression:
             y_pred = np.dot(y_binned_probs, bin_centers)
         elif self.predict_method == "peak":
             y_pred = bin_centers[np.argmax(y_binned_probs, axis=1)]
+        elif self.predict_method == "weighted_angle":
+            complex_bin_centers = np.exp(1j * bin_centers)
+            y_pred_complex = np.dot(y_binned_probs, complex_bin_centers)
+            y_pred = np.angle(y_pred_complex)
         else:
             raise ValueError(
                 f"Unknown predict_method: {self.predict_method}"
-                "Choose 'weighted' or 'peak'."
+                "Choose 'weighted', 'peak', or 'weighted_angle'."
             )
+
         return y_pred[:, None]
 
 
@@ -159,3 +165,18 @@ class Ordinal2dDiscretizer:
                 y_binned[:, i : i + 1]
             )
         return y
+
+
+class CircularKNNRegressor:
+    def __init__(self, **kwargs):
+        self.model = KNeighborsRegressor(**kwargs)
+
+    def fit(self, X, y):
+        y_circular = np.exp(1j * y.flatten())
+        y_circular = np.column_stack((y_circular.real, y_circular.imag))
+        self.model.fit(X, y_circular)
+
+    def predict(self, X):
+        y_circular_pred = self.model.predict(X)
+        y_circular_pred = y_circular_pred[:, 0] + 1j * y_circular_pred[:, 1]
+        return np.angle(y_circular_pred)[:, None]

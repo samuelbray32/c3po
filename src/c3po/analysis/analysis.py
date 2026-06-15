@@ -1037,6 +1037,11 @@ class C3poAnalysis:
                 from sklearn.neighbors import KNeighborsRegressor
 
                 self.decoder_model = KNeighborsRegressor(**kwargs)
+            if model_type == "circular_knn":
+                from .decoder_models import CircularKNNRegressor
+
+                self.decoder_model = CircularKNNRegressor(**kwargs)
+
             elif model_type == "linear":
                 from sklearn.linear_model import LinearRegression
 
