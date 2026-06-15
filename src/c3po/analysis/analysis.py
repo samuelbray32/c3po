@@ -595,17 +595,17 @@ class C3poAnalysis:
         else:
             self._check_embedded_data()
             t_data, c_data = self._select_data(pca, interpolated)
-            if valid_intervals is None:
-                valid_intervals = np.array(
+        if valid_intervals is None:
+            valid_intervals = np.array(
+                [
                     [
-                        [
-                            np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
-                            np.min(
-                                [feature_1_times[-1], feature_2_times[-1], t_data[-1]]
-                            ),
-                        ]
+                        np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
+                        np.min(
+                            [feature_1_times[-1], feature_2_times[-1], t_data[-1]]
+                        ),
                     ]
-                )
+                ]
+            )
 
         if bins_1 is None or isinstance(bins_1, int):
             n_bins_1 = 30 if bins_1 is None else bins_1
