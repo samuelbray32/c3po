@@ -1,28 +1,18 @@
-<script type="text/javascript" src="http://cdn.mathjax.org/mathjax/latest/MathJax.js?config=TeX-AMS-MML_HTMLorMML"></script>
-<script type="text/x-mathjax-config"> MathJax.Hub.Config({ tex2jax: {inlineMath: [['$', '$']]}, messageStyle: "none" });</script>
-
-
-
-# Learning predictive latent structure from unclustered neural spike trains
-
-
 # Abstract
 
+Learning predictive latent structure from unclustered neural spike trains
 
 Understanding the low-dimensional generative processes that shape neural population activity is a central goal of systems neuroscience. However, there remains a need for data processing and dimensionality reduction methods that are compatible with the exploding scale of data acquisition. Existing approaches rely on spike sorting (a time intensive process that discards many low-confidence events) and binned firing rates (which imposes temporal smoothing that obscures fast dynamics). Moreover, reconstructive objectives tend to emphasize dominant activity patterns, making it difficult to capture rare but behaviorally informative neural events. Here we introduce Contrastive Prediction of Point-Process Observations (C3PO), a architecture for inferring latent neural generative variables directly from unclustered spike trains. C3PO models neural activity as a marked point process, operating on continuous spike times and waveform features without spike sorting. Using an objective derived from noise-contrastive estimation, the model learns a low-dimensional context representation which captures the predictive information in the waveform data. We demonstrate this method robustly captures known neural-coding dynamics across varied species and brain regions. Furthermore, we leverage the point-process nature of the model to identify higher-frequency fluctuations in the population dynamics and relate these to behavioral variables. Together, these results establish C3PO as a scalable, unsupervised approach for uncovering generative structure in high-dimensional neural data.
 
-
 ---
-# Results
 
-![Figure1](/home/sambray/Documents/c3po/docs/images/Fig1.png)
+# A Generative Model of Neural Spike Train Observations (Fig 1A)
 
+We begin by outlining an intuitive generative model for how neural population activity gives rise to the spike train observations analyzed in this work.
 
-## A Generative Model of Neural Spike Train Observations (Fig 1A)
+At any moment in time, the activity of a neural population reflects the accumulated history of internal dynamics, external inputs, and ongoing computation. Rather than treating this history as an unstructured sequence of past events, we assume that it can be summarized by a latent variable $G_t$, which acts as a sufficient statistic of the system history for predicting future activity. Formally, $G_t$ captures all information from the past that is relevant for determining the distribution of future spiking events. This concept is closely related to the notion of *causal states* in computational mechanics, where histories are grouped according to their predictive equivalence, and to broader results showing that minimal sufficient statistics preserve predictive information between past and future.
 
-We begin by outlining an intuitive generative model for how neural population activity gives rise to the spike train observations analyzed in this work. At any moment in time, the activity of a neural population reflects the accumulated history of internal dynamics, external inputs, and ongoing computation. Rather than treating this history as an unstructured sequence of past events, we assume that it can be summarized by a latent variable $G_t$, which acts as a sufficient statistic of the system history for predicting future activity. Formally, $G_t$ captures all information from the past that is relevant for determining the distribution of future spiking events. This concept is closely related to the notion of *causal states* in computational mechanics, where histories are grouped according to their predictive equivalence, and to broader results showing that minimal sufficient statistics preserve predictive information between past and future.
-
-### Conditional Intensity Function
+## Conditional Intensity Function
 
 Within this framework, the probability that a given neuron emits a spike at time $t$ is governed by a conditional intensity (hazard) function:
 
@@ -32,17 +22,17 @@ $$
 
 where $n$ indexes neurons. This mapping can be interpreted as a firing rate field defined over the latent state $G$. In analogy to classical tuning curves, which describe firing rates as functions of experimentally controlled variables, here each neuron exhibits a (generally nonlinear) response function over the latent generative state. These functions may be highly nonlinear and reflect mixed selectivity to multiple underlying variables.
 
-### Latent Dynamical Systems Perspective
+## Latent Dynamical Systems Perspective
 
 To build intuition for the role of $G$, it is helpful to view neural population activity through the lens of low-dimensional dynamical systems. A growing body of work has shown that high-dimensional neural activity often evolves on low-dimensional manifolds governed by latent dynamics. In this perspective, $G_t$ corresponds to a point in this latent state space, whose evolution captures the computation being performed by the circuit.
 
 For example, in hippocampus, the activity of place cells is driven by a combination of sensory inputs, memory, and movement history, yet can be well described as a function of a low-dimensional latent variable such as spatial position. In this case, $G_t$ can be interpreted as the animal’s position (or a related internal estimate), and each neuron’s firing rate field $\lambda_n(G)$ corresponds to its place field. More generally, in different brain regions, latent variables may encode mixtures of task variables, internal states, or dynamical trajectories, giving rise to distributed and context-dependent firing patterns.
 
-### Spike Generation as a Point Process
+## Spike Generation as a Point Process
 
 Given these hazard functions, spikes are generated as stochastic events drawn from a point process. That is, conditioned on the latent state $G_t$, each neuron emits spikes probabilistically according to its instantaneous firing rate $\lambda_n(G_t)$, consistent with standard point-process formulations of neural activity. This stochastic sampling reflects both intrinsic neural variability and unobserved influences on the system.
 
-### Observations as a Marked Point Process
+## Observations as a Marked Point Process
 
 Finally, neural recordings do not directly observe neuron identities or spike events in isolation. Instead, extracellular electrodes measure voltage deflections produced by nearby neurons, resulting in observed waveform snippets whose shapes depend on the spatial and biophysical properties of the underlying sources. Each detected event therefore consists of a time of occurrence and an associated waveform.
 
@@ -56,16 +46,15 @@ where $\Delta t_i$ denotes the inter-event interval and $W_i$ denotes the record
 
 These observations arise from a cascade of transformations: Latent neural dynamics $G_t$ determine firing probabilities, spikes are stochastically generated from these probabilities, and electrode measurements produce high-dimensional, mixed observations of these events
 
-### Summary and Challenge
+## Summary and Challenge
 
 This generative view highlights the central challenge: the latent state $G_t$ that governs neural activity is not directly observed, and must be inferred from indirect, noisy, and high-dimensional measurements. The following sections develop a framework for learning representations that recover this latent predictive structure directly from the observed spike train.
 
-
 ---
 
-## Model Architecture
+# Model Architecture
 
-### Recovering latent structure from marked point-process observations (Fig. 1A)
+## Recovering latent structure from marked point-process observations (Fig. 1A)
 
 We now construct a model that inverts the generative process described above. In the generative view, latent neural dynamics $G_t$ give rise to firing rates $\lambda(G_t)$, from which spikes are stochastically generated and subsequently observed as waveform-marked events. Our goal is to learn a representation that recovers the predictive structure of $G_t$ directly from these observations.
 
@@ -85,7 +74,7 @@ where $Z_i$ represents a low-dimensional embedding of individual events, and $C_
 
 ---
 
-### Mark embedding
+## Mark embedding
 
 The first stage of the model constructs a low-dimensional embedding of the observed waveform features. Each waveform $W_i \in \mathbb{R}^{D_{\text{obs}}}$ is mapped to a latent representation:
 
@@ -102,7 +91,7 @@ From the perspective of the generative model, this stage corresponds to inferrin
 
 ---
 
-## Context Representation of Latent Dynamics
+# Context Representation of Latent Dynamics
 
 To capture the temporal structure of neural activity, we construct a context variable $C_i$ that integrates information across past events:
 
@@ -126,7 +115,7 @@ The resulting context variable $C_i$ represents a learned summary of population 
 
 ---
 
-### Conditional hazard and rate modeling
+## Conditional hazard and rate modeling
 
 In the generative process, the latent state $G_t$ determines a set of continuously varying firing rates $\lambda(G_t)$, which define the stochastic generation of spike events. In contrast, our observations are discrete events drawn from a point process. Modeling their likelihood therefore requires specifying a conditional hazard function:
 
@@ -158,7 +147,7 @@ This shared-space formulation places both marks and contexts in a common latent 
 
 ---
 
-### Relationship to the generative model
+## Relationship to the generative model
 
 The model architecture provides a structured approximation to the generative process described in Fig. 1A. The latent state $G_t$ is replaced by the learned context representation $C_t$, the emission process is captured by the mark embedding $Z$, and the firing rate field $\lambda(G)$ is replaced by the parameterized hazard function $H(X \mid C)$.
 
@@ -170,12 +159,11 @@ $$
 
 Rather than explicitly recovering $G_t$ the model learns representations $C_t$ and $Z_i$ that are sufficient for predicting future observations, thereby capturing the predictive structure of the underlying neural dynamics.
 
-
 ---
 
-## Contrastive Learning of Marked Point-Process Likelihoods
+# Contrastive Learning of Marked Point-Process Likelihoods
 
-### Likelihood formulation for marked point-process observations
+## Likelihood formulation for marked point-process observations
 
 We begin by deriving the likelihood of a single observed event at time $t_i$, with observation sequence
 $X = \{(\Delta t_i, W_i)\}$ and context representation $C_{i-1}$ summarizing the event history. The observed waveform is first embedded as $Z_i = \epsilon(W_i)$ as described above
@@ -217,7 +205,7 @@ This formulation directly parallels classical maximum likelihood estimation for 
 
 ---
 
-### Contrastive reformulation via noise-contrastive estimation
+## Contrastive reformulation via noise-contrastive estimation
 
 To address this challenge, we reformulate likelihood estimation as a contrastive prediction problem using noise-contrastive estimation (NCE). Instead of directly computing the likelihood, we consider a set of candidate marks:
 
@@ -264,7 +252,7 @@ $$
 
 ---
 
-### Connection to contrastive predictive coding and mutual information
+## Connection to contrastive predictive coding and mutual information
 
 The ratio $\frac{H(Z \mid C)}{H'(Z)}$ plays a role directly analogous to the density ratio
 $\frac{p(x \mid c)}{p(x)}$ in contrastive predictive coding (CPC). In CPC, the optimal scoring function learned under the InfoNCE objective is proportional to this density ratio:
@@ -295,11 +283,11 @@ Thus, the contrastive objective does not merely provide a tractable approximatio
 
 ---
 
-### Choice of alternative model
+## Choice of alternative model
 
 The alternative model $H'$ defines a reference distribution over mark space and influences the geometry of the learned embedding.
 
-#### Uniform hazard
+### Uniform hazard
 
 In the simplest case, the hazard is independent of the mark:
 
@@ -317,7 +305,7 @@ Under the additional assumption that the hazard is independent of time, this for
 
 ---
 
-#### Regularization of the mark space
+### Regularization of the mark space
 
 More generally, the alternative model can be used to impose structure on the embedding. We consider a Poisson process independent of context, with intensity decaying with the norm of the embedding:
 
@@ -327,14 +315,13 @@ $$
 
 This choice regularizes the mark space by encouraging embeddings that do not contribute to prediction to collapse toward the origin. Empirically, using the Euclidean norm stabilizes training and improves convergence. In this setting, events that are uninformative for predicting future activity—such as spikes generated independently of network state—are mapped to regions of low norm, reflecting their reduced contribution to the predictive representation.
 
-### Inferred context describes an (incomplete) bases over G
+## Inferred context describes an (incomplete) bases over G
 
 As shown above, the training procedure optimizes for $C$  that approximates the predictive information of $G$ and with a linear projection to firing rates. Given that the rates of each neuron are in general an nonlinear function over $G$ ($\lambda_n(\mid G) = f_n(G)$, then the components of $C$ must comprise a set of non-linear basis functions over $G$. The alignment of a neuron's embedded waveform ($Z$) with the different $C$ components therefore describe a weighted sum of these bases functions which strives to apprximated the neuron's firing field (Fig. 1D).
 
-
 ---
 
-## Toy model of neural population activity driven by a periodic latent variable (Fig. 1E)
+# Toy model of neural population activity driven by a periodic latent variable (Fig. 1E)
 
 To validate the proposed framework in a setting with known ground truth, we constructed a synthetic dataset in which neural activity is generated by a low-dimensional latent dynamical variable. Specifically, we consider a single periodic latent variable
 $θ(t)$ evolving on a circular manifold, which defines the state of the system at each timepoint.
@@ -347,3 +334,99 @@ Spiking events are sampled from an inhomogeneous Poisson process with rates dete
 $$X={(Δti,Wi)}$$
 
 The resulting dataset captures key properties of real neural recordings: (i) low-dimensional latent structure underlying population activity, (ii) nonlinear mappings between latent state and firing rates, (iii) indirect, high-dimensional observations without neuron identity labels, and (iv) the presence of non-informative units that do not encode the latent variable. This controlled setting enables direct evaluation of whether the model can recover latent structure and distinguish predictive from non-predictive activity in clusterless spike data.
+
+### non-formatted
+
+Structure of the learned context representation reveals a predictive basis over latent dynamics (Fig. 1F–H)
+
+To analyze the structure of the learned context representation, we projected the context vectors
+Ci
+C
+i
+ ​
+
+ into a low-dimensional space using principal component analysis (PCA). Because the predicted hazard is linear in
+C
+C,
+
+λ^(Z∣C)=Z⊤C,
+λ
+^
+(Z∣C)=Z
+⊤
+C,
+
+any linear transformation of the context representation preserves model predictions. PCA therefore provides a valid and interpretable coordinate system for analyzing the learned embedding.
+
+Low-dimensional geometry reflects latent phase (Fig. 1F)
+
+We first examined the geometry of the learned representation by plotting the first two principal components of
+C
+C, with each point colored by the true latent phase
+θ(t)
+θ(t) at the corresponding time. The resulting embedding forms a circular manifold, with position along the manifold varying smoothly with
+θ
+θ.
+
+This demonstrates that the model recovers the topology of the underlying latent space directly from unclustered spike data. Despite receiving no supervision on the latent variable, the learned representation organizes activity according to the true generative structure.
+
+Temporal dynamics of the context track latent evolution (Fig. 1G)
+
+We next examined the temporal evolution of the context representation by plotting individual principal components of
+C
+C as a function of time. These traces exhibit smooth, periodic dynamics that closely follow the evolution of the latent phase.
+
+This confirms that the context representation does not merely encode static structure, but instead tracks the underlying dynamical process over time. The learned state evolves continuously with the latent variable, consistent with its interpretation as a predictive summary of the system history.
+
+Context dimensions form phase-dependent basis functions (Fig. 1H)
+
+To characterize the functional structure of the representation, we computed the average value of each principal component as a function of latent phase:
+
+⟨Ck⟩(θ)=E[Ck∣θ].
+⟨C
+k
+ ​
+
+⟩(θ)=E[C
+k
+ ​
+
+∣θ].
+
+These curves reveal that the context dimensions form structured basis functions over the latent variable. In particular, components appear in phase-shifted pairs, with approximately sinusoidal dependence on
+θ
+θ. Higher-order components exhibit increasing frequency, corresponding to functions of the form
+sin⁡(nθ)
+sin(nθ) and
+cos⁡(nθ)
+cos(nθ) for increasing
+n
+n.
+
+This structure is consistent with a Fourier-like basis over the latent space, in which nonlinear tuning curves can be expressed as linear combinations of these components.
+
+Interpretation as a predictive basis representation
+
+These results provide a direct empirical validation of the theoretical interpretation introduced in Fig. 1D. Because the hazard function is linear in
+C
+C, the model must represent firing rates as linear functions of the context:
+
+λn(θ)≈wn⊤C(θ).
+λ
+n
+ ​
+
+(θ)≈w
+n
+⊤
+ ​
+
+C(θ).
+
+Thus, the learned mapping
+C(θ)
+C(θ) acts as a basis expansion of the latent variable, transforming nonlinear firing rate functions into a representation that is linear in
+C
+C. The specific basis learned is not unique, but all such representations span the same predictive function space.
+
+Together, these findings show that C3PO learns a low-dimensional, dynamically evolving representation that both captures the latent structure of the data and organizes it into a set of basis functions suitable for prediction.
