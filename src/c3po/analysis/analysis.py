@@ -6,7 +6,7 @@ import jax
 from functools import lru_cache
 from multiprocessing import Pool
 from scipy.signal import correlate
-from typing import Tuple, List, Union
+from typing import Tuple, List, Union, Optional
 
 from flax import serialization
 
@@ -14,6 +14,20 @@ from ..model.model import Embedding, C3PO
 from ..model.bidirectional_model import BidirectionalC3PO
 
 figure_directory = "/home/sambray/Documents/c3po/Figures/"
+
+
+def _is_sorted(arr):
+    return np.all(arr[:-1] <= arr[1:])
+
+
+def _interval_list_contains_ind_sorted(interval_list, timestamps):
+    ind = []
+    for interval in interval_list:
+        st = np.searchsorted(timestamps, interval[0], side="left")
+        en = np.searchsorted(timestamps, interval[1], side="right")
+        ind += list(range(st, en))
+    ind = np.unique(ind)
+    return np.asarray(ind)
 
 
 def interval_list_contains_ind(interval_list, timestamps):
@@ -26,6 +40,8 @@ def interval_list_contains_ind(interval_list, timestamps):
     timestamps : array_like
     """
     ind = []
+    if _is_sorted(timestamps):
+        return _interval_list_contains_ind_sorted(interval_list, timestamps)
     for interval in interval_list:
         ind += np.ravel(
             np.argwhere(
@@ -45,14 +61,9 @@ def interval_list_contains(interval_list, timestamps):
         Each element is (start time, stop time), i.e. an interval in seconds.
     timestamps : array_like
     """
-    ind = []
-    for interval in interval_list:
-        ind += np.ravel(
-            np.argwhere(
-                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
-            )
-        ).tolist()
-    ind = np.unique(ind)
+    ind = interval_list_contains_ind(interval_list, timestamps)
+    if len(ind) == 0:
+        return np.array([])
     return timestamps[ind]
 
 
@@ -340,6 +351,52 @@ class C3poAnalysis:
     # ----------------------------------------------------------------------------------
     # PCA projection
 
+    def detrend_context(self, method="projection", intervals=None):
+        """Method to remove slow-timescale changes in context"""
+        self._check_embedded_data()
+        if method == "linear":
+            self.c_pca = None
+            self.c_pca_interp = None
+            self.pca = None
+            self.linear_detrend(intervals=intervals)
+        elif method == "projection":
+            self.c_pca = None
+            self.c_pca_interp = None
+            self.pca = None
+            self.proj_detrend(fit_intervals=intervals)
+
+        else:
+            raise ValueError(f"Detrending method {method} not supported.")
+
+    def linear_detrend(self, intervals=None):
+        if intervals is None:
+            intervals = np.array([[self.t[0], self.t[-1]]])
+        ind = interval_list_contains_ind(intervals, self.t)
+        fit_detrend = np.zeros_like(self.c)
+        for i in range(self.context_dim):
+            fit_detrend[:, i] = np.polyval(
+                np.polyfit(self.t[ind], self.c[ind, i], deg=1), self.t
+            )
+        self.c = self.c - fit_detrend
+        return
+
+    def proj_detrend(self, fit_intervals=None):
+        if fit_intervals is None:
+            fit_intervals = np.array([[self.t[0], self.t[-1]]])
+        t, data = self._select_data(pca=False, interpolated=False)
+        fit_ind = interval_list_contains_ind(fit_intervals, t)
+        data = data[fit_ind]
+        t = t[fit_ind]
+        ind_valid = ~np.isnan(data).any(axis=1)
+        data = data[ind_valid]
+        t = t[ind_valid]
+        # get the projection axis
+        axis = np.polyfit(t, data, deg=1)[0]
+        axis = axis / np.linalg.norm(axis)
+        # project out the axis
+        projection = self.c @ axis
+        self.c = self.c - np.outer(projection, axis)
+
     def fit_context_pca(self, fit_intervals=None, interpolated=False):
         self._check_embedded_data()
         if fit_intervals is None:
@@ -514,6 +571,7 @@ class C3poAnalysis:
         return_counts=False,
         jitter_feature_sigma=None,
         jitter_feature_n=None,
+        passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
     ):
         """
         Bin the context by co-occurring feature values
@@ -525,16 +583,26 @@ class C3poAnalysis:
             feature_2_times (np.ndarray): Times of the feature values. Shape (n_samples,).
             bins (int, optional): Number of bins to use. Defaults to None.
             valid_intervals (np.ndarray, optional): Intervals to consider. Defaults to None.
+
+        Returns:
+            context_binned (list of list of np.ndarray): Binned context. Shape (n_bins_1, n_bins_2).
+            bins_1 (np.ndarray): Bin edges for feature 1. Shape (n_bins_1,).
+            bins_2 (np.ndarray): Bin edges for feature 2. Shape (n_bins_2,).
         """
         # select and parse data
-        self._check_embedded_data()
-        t_data, c_data = self._select_data(pca, interpolated)
+        if passed_data is not None:
+            t_data, c_data = passed_data
+        else:
+            self._check_embedded_data()
+            t_data, c_data = self._select_data(pca, interpolated)
         if valid_intervals is None:
             valid_intervals = np.array(
                 [
                     [
                         np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
-                        np.min([feature_1_times[-1], feature_2_times[-1], t_data[-1]]),
+                        np.min(
+                            [feature_1_times[-1], feature_2_times[-1], t_data[-1]]
+                        ),
                     ]
                 ]
             )
@@ -943,6 +1011,8 @@ class C3poAnalysis:
     # decoder tools: Testing decodability of latent factors to known variables
     import sklearn
 
+    _decoder_kwargs = None
+
     def initialize_decoder(
         self, model_type="knn", feature_prediction_delay=0, **kwargs
     ):
@@ -955,6 +1025,11 @@ class C3poAnalysis:
             feature_prediction_delay (float, optional): Time delay to apply to feature times when matching to context. Defaults to 0.
             **kwargs: Additional keyword arguments to pass to the model constructor.
         """
+        store_kwargs = locals()
+        store_kwargs.pop("self")
+        store_kwargs.update(store_kwargs.pop("kwargs"))
+        self._decoder_kwargs = store_kwargs
+
         self.feature_prediction_delay = feature_prediction_delay
         self.decoder_model = None
         if isinstance(model_type, str):
@@ -962,6 +1037,11 @@ class C3poAnalysis:
                 from sklearn.neighbors import KNeighborsRegressor
 
                 self.decoder_model = KNeighborsRegressor(**kwargs)
+            if model_type == "circular_knn":
+                from .decoder_models import CircularKNNRegressor
+
+                self.decoder_model = CircularKNNRegressor(**kwargs)
+
             elif model_type == "linear":
                 from sklearn.linear_model import LinearRegression
 
@@ -1222,8 +1302,6 @@ class C3poAnalysis:
             interval_list_complement(intervals, predict_interval)
             for predict_interval in predict_intervals
         ]
-
-        base_decoder = self.decoder_model.copy()
         predictions = []
         prediction_times = []
         for fit_interval, predict_interval in tqdm(
@@ -1231,7 +1309,9 @@ class C3poAnalysis:
             total=cross_fold,
             desc="Cross-validating decoder",
         ):
-            self.decoder_model = base_decoder.copy()
+            self.initialize_decoder(
+                **self._decoder_kwargs
+            )  # Re-initialize the decoder with the original parameters
             self.fit_decoder(
                 feature_values,
                 feature_times,

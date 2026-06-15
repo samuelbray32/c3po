@@ -1,9 +1,11 @@
+from sklearn.neighbors import KNeighborsRegressor
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.linear_model import LogisticRegression
 import numpy as np
 
 
 class DiscretizedRegression:
+
     def __init__(
         self,
         n_bins=10,
@@ -11,6 +13,8 @@ class DiscretizedRegression:
         max_iter=1000,
         balance_groups=False,
         multidim=False,
+        predict_method="weighted",
+        **kwargs,
     ):
         if multidim:
             self.discretizer = Ordinal2dDiscretizer(
@@ -23,8 +27,21 @@ class DiscretizedRegression:
         self.n_bins = n_bins  # stored for copy
         self.bin_strategy = bin_strategy  # stored for copy
         self.multidim = multidim
-        self.model = LogisticRegression(max_iter=max_iter)
+        self.model = LogisticRegression(max_iter=max_iter, **kwargs)
         self.balance_groups = balance_groups
+        self.predict_method = predict_method
+        self._model_kwargs = kwargs
+
+    def copy(self):
+        return DiscretizedRegression(
+            n_bins=self.n_bins,
+            bin_strategy=self.bin_strategy,
+            max_iter=self.model.max_iter,
+            balance_groups=self.balance_groups,
+            multidim=self.multidim,
+            predict_method=self.predict_method,
+            **self._model_kwargs,
+        )
 
     def copy(self):
         return DiscretizedRegression(
@@ -54,7 +71,9 @@ class DiscretizedRegression:
                 if count > 0
             }
             self.model = LogisticRegression(
-                max_iter=self.model.max_iter, class_weight=class_weights
+                max_iter=self.model.max_iter,
+                class_weight=class_weights,
+                **self._model_kwargs,
             )
 
         self.model.fit(X, y_binned)
@@ -70,7 +89,19 @@ class DiscretizedRegression:
         bin_centers = (
             self.discretizer.bin_edges_[0][:-1] + self.discretizer.bin_edges_[0][1:]
         ) / 2
-        y_pred = np.dot(y_binned_probs, bin_centers)
+        if self.predict_method == "weighted":
+            y_pred = np.dot(y_binned_probs, bin_centers)
+        elif self.predict_method == "peak":
+            y_pred = bin_centers[np.argmax(y_binned_probs, axis=1)]
+        elif self.predict_method == "weighted_angle":
+            complex_bin_centers = np.exp(1j * bin_centers)
+            y_pred_complex = np.dot(y_binned_probs, complex_bin_centers)
+            y_pred = np.angle(y_pred_complex)
+        else:
+            raise ValueError(
+                f"Unknown predict_method: {self.predict_method}. Choose 'weighted', 'peak', or 'weighted_angle'."
+            )
+
         return y_pred[:, None]
 
 
@@ -142,3 +173,18 @@ class Ordinal2dDiscretizer:
                 y_binned[:, i : i + 1]
             )
         return y
+
+
+class CircularKNNRegressor:
+    def __init__(self, **kwargs):
+        self.model = KNeighborsRegressor(**kwargs)
+
+    def fit(self, X, y):
+        y_circular = np.exp(1j * y.flatten())
+        y_circular = np.column_stack((y_circular.real, y_circular.imag))
+        self.model.fit(X, y_circular)
+
+    def predict(self, X):
+        y_circular_pred = self.model.predict(X)
+        y_circular_pred = y_circular_pred[:, 0] + 1j * y_circular_pred[:, 1]
+        return np.angle(y_circular_pred)[:, None]

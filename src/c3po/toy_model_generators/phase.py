@@ -164,3 +164,182 @@ def generate_periodic_spike_train(
 
     tuning_curves = {"theta_max": theta_max, "sigma": sigma, "amplitude": amplitude}
     return mark_ids, mark_times, marks, template_waveforms, tuning_curves
+
+
+# ------------- Generic Field version -------------------------------------------------#
+
+
+def generate_periodic_spike_train_multimodal(
+    latent_period: float = 3,
+    noise_scale: float = 0.1,
+    t_max: float = 10000,
+    n_units: int = 16,
+    n_channels: int = 32,
+    max_wait_update: float = None,
+):
+    """Generate a spike train driven by a periodic latent variable.
+
+    Args:
+        latent_period (float, optional): Period of the latent variable. Defaults to 3.
+        noise_scale (float, optional): Standard deviation of the noise added to the waveforms. Defaults to .1.
+        t_max (float, optional): Duration of the spike train. Defaults to 10000.
+        n_units (int, optional): Number of neurons. Defaults to 16.
+        n_channels (int, optional): Number of probe channels. Defaults to 32.
+        max_wait_update (float, optional): Maximum wait time before updating the firing rates. Defaults to 1/10 the latent period.
+
+    Returns:
+        tuple: Tuple containing the spike times, neuron ids, waveforms, template waveforms and tuning curves.
+    """
+
+    fields, theta_bins = make_multimodal_tuning_curve_set(n_units, n_theta_bins=100)
+    template_waveforms = generate_waveform_features(n_channels, n_units)
+
+    # generate spike train
+    t0 = 0
+    mark_times = []
+    mark_ids = []
+    marks = []
+
+    if max_wait_update is None:
+        max_wait_update = latent_period / 10
+    while t0 < t_max:
+        # get wait time
+        theta_t = np.mod(t0, latent_period) / latent_period * 2 * np.pi
+        ind_theta = np.digitize(theta_t, theta_bins) - 1
+        rates = fields[ind_theta, :]
+        cum_rate = np.sum(rates)
+        if not np.isfinite(cum_rate) or cum_rate <= 0:
+            t0 += max_wait_update
+            continue
+        wait_time = np.random.exponential(1 / cum_rate)
+
+        # resample with updated rates if wait time is too long
+        if wait_time > max_wait_update:
+            t0 += max_wait_update
+            continue
+
+        # get event id
+        t0 += wait_time
+        rates.shape
+        p_unit = rates / rates.sum()
+        if (total_p := p_unit[:-1].sum()) > 1:
+            p_unit = p_unit * (1 / (total_p + 1e-8))
+        p_unit[-1] = 1 - p_unit[:-1].sum()
+        unit_id = np.random.choice(rates.shape[0], p=p_unit)
+
+        # store values
+        mark_times.append(t0)
+        mark_ids.append(unit_id)
+        marks.append(
+            template_waveforms[unit_id] + np.random.normal(0, noise_scale, n_channels)
+        )
+
+    mark_ids = np.array(mark_ids)
+    mark_times = np.array(mark_times)
+    marks = np.array(marks)
+
+    return mark_ids, mark_times, marks, template_waveforms, fields
+
+
+def make_multimodal_tuning_curve_set(n_units: int = 16, n_theta_bins=100) -> tuple:
+    """Generate a set of tuning curves for a population of neurons.
+
+    Args:
+        n_units (int, optional): number of neurons. Defaults to 16.
+        n_theta_bins (int, optional): number of theta bins. Defaults to 100.
+
+    Returns:
+        tuple: Tuple containing the preferred angles, standard deviations and maximum firing rates of the neurons.
+    """
+    theta_bins = np.linspace(0, 2 * np.pi, n_theta_bins)
+    fields = np.zeros((n_theta_bins, n_units))
+    for i in range(n_units):
+        n_fields = np.random.randint(1, 4)
+        for _ in range(n_fields):
+            theta_max = np.random.uniform(0, 2 * np.pi)
+            sigma = np.random.uniform(0.1, 0.5)
+            amplitude = np.random.uniform(3, 10)
+            fields[:, i] += firing_rate(theta_bins, theta_max, sigma, amplitude)
+    return fields, theta_bins
+
+
+# ------------- Multi-Factor Generic Field version -------------------------------------#
+def generate_periodic_spike_train_multifactor(
+    latent_periods=[0.3, 3, 10],
+    noise_scale: float = 0.1,
+    t_max: float = 10000,
+    n_units: int = 16,
+    n_channels: int = 32,
+    max_wait_update: float = None,
+):
+    """Generate a spike train driven by multiple periodic latent variables.
+
+    Args:
+        latent_periods (list, optional): Periods of the latent variables. Defaults to [.3, 3, 10].
+        noise_scale (float, optional): Standard deviation of the noise added to the waveforms. Defaults to .1.
+        t_max (float, optional): Duration of the spike train. Defaults to 10000.
+        n_units (int, optional): Number of neurons. Defaults to 16.
+        n_channels (int, optional): Number of probe channels. Defaults to 32.
+        max_wait_update (float, optional): Maximum wait time before updating the firing rates. Defaults to 1/10 the shortest latent period.
+
+    Returns:
+        tuple: Tuple containing the spike times, neuron ids, waveforms, template waveforms and tuning curves.
+    """
+
+    fields_list = []
+    theta_bins_list = []
+    for period in latent_periods:
+        fields, theta_bins = make_multimodal_tuning_curve_set(n_units, n_theta_bins=100)
+        fields_list.append(fields)
+        theta_bins_list.append(theta_bins)
+
+    template_waveforms = generate_waveform_features(n_channels, n_units)
+
+    # generate spike train
+    t0 = 0
+    mark_times = []
+    mark_ids = []
+    marks = []
+
+    if max_wait_update is None:
+        max_wait_update = min(latent_periods) / 10
+    while t0 < t_max:
+        # get wait time
+        rates = np.ones(n_units)
+        for i, period in enumerate(latent_periods):
+            theta_t = np.mod(t0, period) / period * 2 * np.pi
+            ind_theta = np.digitize(theta_t, theta_bins_list[i]) - 1
+            rates *= fields_list[i][ind_theta, :]
+
+        cum_rate = np.sum(rates)
+        if not np.isfinite(cum_rate) or cum_rate <= 0:
+            t0 += max_wait_update
+            continue
+        wait_time = np.random.exponential(1 / cum_rate)
+
+        # resample with updated rates if wait time is too long
+        if wait_time > max_wait_update:
+            t0 += max_wait_update
+            continue
+
+        # get event id
+        t0 += wait_time
+        rates.shape
+        p_unit = rates / rates.sum()
+        if (total_p := p_unit[:-1].sum()) > 1:
+            p_unit = p_unit * (1 / (total_p + 1e-8))
+        p_unit[-1] = 1 - p_unit[:-1].sum()
+        unit_id = np.random.choice(rates.shape[0], p=p_unit)
+
+        # store values
+        mark_times.append(t0)
+        mark_ids.append(unit_id)
+        marks.append(
+            template_waveforms[unit_id] + np.random.normal(0, noise_scale, n_channels)
+        )
+
+    mark_ids = np.array(mark_ids)
+    mark_times = np.array(mark_times)
+    marks = np.array(marks)
+
+    return mark_ids, mark_times, marks, template_waveforms, fields_list
