@@ -43,6 +43,15 @@ class DiscretizedRegression:
             **self._model_kwargs,
         )
 
+    def copy(self):
+        return DiscretizedRegression(
+            n_bins=self.n_bins,
+            bin_strategy=self.bin_strategy,
+            max_iter=self.model.max_iter,
+            balance_groups=self.balance_groups,
+            multidim=self.multidim,
+        )
+
     def fit(self, X, y):
         print(np.nanmin(y), np.nanmax(y))
         # y = np.squeeze(y)
