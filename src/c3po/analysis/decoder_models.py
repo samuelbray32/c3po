@@ -99,8 +99,7 @@ class DiscretizedRegression:
             y_pred = np.angle(y_pred_complex)
         else:
             raise ValueError(
-                f"Unknown predict_method: {self.predict_method}"
-                "Choose 'weighted', 'peak', or 'weighted_angle'."
+                f"Unknown predict_method: {self.predict_method}. Choose 'weighted', 'peak', or 'weighted_angle'."
             )
 
         return y_pred[:, None]
