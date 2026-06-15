@@ -208,12 +208,14 @@ def generate_periodic_spike_train_multimodal(
         ind_theta = np.digitize(theta_t, theta_bins) - 1
         rates = fields[ind_theta, :]
         cum_rate = np.sum(rates)
+        if not np.isfinite(cum_rate) or cum_rate <= 0:
+            t0 += max_wait_update
+            continue
         wait_time = np.random.exponential(1 / cum_rate)
 
         # resample with updated rates if wait time is too long
         if wait_time > max_wait_update:
             t0 += max_wait_update
-            print("waited")
             continue
 
         # get event id
@@ -310,12 +312,14 @@ def generate_periodic_spike_train_multifactor(
             rates *= fields_list[i][ind_theta, :]
 
         cum_rate = np.sum(rates)
+        if not np.isfinite(cum_rate) or cum_rate <= 0:
+            t0 += max_wait_update
+            continue
         wait_time = np.random.exponential(1 / cum_rate)
 
         # resample with updated rates if wait time is too long
         if wait_time > max_wait_update:
             t0 += max_wait_update
-            print("waited")
             continue
 
         # get event id
