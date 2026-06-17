@@ -13,7 +13,12 @@ from flax import serialization
 
 from ..model.model import Embedding, C3PO
 from ..model.bidirectional_model import BidirectionalC3PO
-from c3po.analysis.utils_io import save_params_hdf5, load_params_hdf5, write_config, read_config
+from c3po.analysis.utils_io import (
+    save_params_hdf5,
+    load_params_hdf5,
+    write_config,
+    read_config,
+)
 
 figure_directory = "/home/sambray/Documents/c3po/Figures/"
 
@@ -125,14 +130,17 @@ def interval_list_complement(intervals1, intervals2):
             subtracted = new_subtracted
         result.extend(subtracted)
     return np.array(result)
+
+
 class C3poAnalysis:
-    def __init__(self,
-                 model=None,
-                 model_args=None,
-                 params=None,
-                 init_key=None,
-                 model_dir=None,
-                 ):
+    def __init__(
+        self,
+        model=None,
+        model_args=None,
+        params=None,
+        init_key=None,
+        model_dir=None,
+    ):
         if init_key:
             if not all([val is None for val in [model, model_args, params, model_dir]]):
                 raise ValueError(
@@ -638,9 +646,7 @@ class C3poAnalysis:
                 [
                     [
                         np.max([feature_1_times[0], feature_2_times[0], t_data[0]]),
-                        np.min(
-                            [feature_1_times[-1], feature_2_times[-1], t_data[-1]]
-                        ),
+                        np.min([feature_1_times[-1], feature_2_times[-1], t_data[-1]]),
                     ]
                 ]
             )
@@ -1435,7 +1441,6 @@ class C3poAnalysis:
         """
         self.params = load_params_hdf5(file_path)
 
-
     def save_model_args(self, file_path: Union[str, Path]):
         """
         Save the model initialization arguments to a JSON file.
@@ -1469,7 +1474,9 @@ class C3poAnalysis:
         params_path = model_dir / "params.hdf5"
         args_path = model_dir / "args.json"
         if any(p.exists() for p in [embedding_path, params_path, args_path]):
-            raise FileExistsError(f"Model directory {model_dir} already contains a model")
+            raise FileExistsError(
+                f"Model directory {model_dir} already contains a model"
+            )
         self.save_embedding(embedding_path)
         self.save_params(params_path)
         self.save_model_args(args_path)
@@ -1485,8 +1492,6 @@ class C3poAnalysis:
         self.load_embedding(model_dir / "embedding.npz")
         self.load_params(model_dir / "params.hdf5")
         self.load_model_args(model_dir / "args.json")
-
-
 
 
 def bootstrap_traces(

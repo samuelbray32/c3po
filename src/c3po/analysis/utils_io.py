@@ -107,6 +107,7 @@ def _read_group(group: h5py.Group) -> dict[str, Any]:
 # argument params as JSON files
 import json
 
+
 def make_json_serializable(value: Any) -> Any:
     """Convert Python/NumPy objects into JSON-serializable objects.
 
@@ -122,10 +123,7 @@ def make_json_serializable(value: Any) -> Any:
         JSON-serializable version of ``value``.
     """
     if isinstance(value, dict):
-        return {
-            str(key): make_json_serializable(item)
-            for key, item in value.items()
-        }
+        return {str(key): make_json_serializable(item) for key, item in value.items()}
 
     if isinstance(value, (list, tuple)):
         return [make_json_serializable(item) for item in value]
