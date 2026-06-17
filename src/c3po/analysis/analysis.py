@@ -1,6 +1,7 @@
 import numpy as np
 from sklearn.decomposition import PCA
 from tqdm import tqdm
+from pathlib import Path
 
 import jax
 from functools import lru_cache
@@ -12,6 +13,7 @@ from flax import serialization
 
 from ..model.model import Embedding, C3PO
 from ..model.bidirectional_model import BidirectionalC3PO
+from c3po.analysis.utils_io import save_params_hdf5, load_params_hdf5, write_config, read_config
 
 figure_directory = "/home/sambray/Documents/c3po/Figures/"
 
@@ -123,16 +125,27 @@ def interval_list_complement(intervals1, intervals2):
             subtracted = new_subtracted
         result.extend(subtracted)
     return np.array(result)
-
-
 class C3poAnalysis:
-    def __init__(self, model=None, model_args=None, params=None, init_key=None):
+    def __init__(self,
+                 model=None,
+                 model_args=None,
+                 params=None,
+                 init_key=None,
+                 model_dir=None,
+                 ):
         if init_key:
-            if not all([val is None for val in [model, model_args, params]]):
+            if not all([val is None for val in [model, model_args, params, model_dir]]):
                 raise ValueError(
-                    "If init_key is provided, model, model_args, and params must be null value."
+                    "If init_key is provided, model, model_args, and params, and model_dir must be null value."
                 )
             model, model_args, params = self.initialize_from_table_entry(init_key)
+        elif model_dir is not None:
+            if not all([val is None for val in [model, model_args, params]]):
+                raise ValueError(
+                    "If model_dir is provided, model, model_args, and params must be null value."
+                )
+            model, model_args, params = self.initialize_from_directory(model_dir)
+
         elif not all([val is not None for val in [model, model_args, params]]):
             raise ValueError(
                 "If init_key is not provided, model, model_args, and params must be provided."
@@ -157,6 +170,9 @@ class C3poAnalysis:
         self.decode_pca = None
 
         self.projected_context = dict()
+
+        if model_dir is not None:
+            self.load_embedding(Path(model_dir) / "embedding.npz")
 
     def copy(self):
         new_analysis = C3poAnalysis(
@@ -185,6 +201,25 @@ class C3poAnalysis:
         new_analysis.projected_context = self.projected_context.copy()
 
         return new_analysis
+
+    def initialize_from_directory(self, model_dir: str | Path):
+        model_dir = Path(model_dir)
+        if not model_dir.is_dir():
+            raise ValueError(f"model_dir {model_dir} is not a directory.")
+        # load trained params
+        model_path = model_dir / "params.hdf5"
+        if not model_path.is_file():
+            raise ValueError(f"params.hdf5 not found in {model_dir}.")
+        params = load_params_hdf5(model_path)
+        # load model args
+        model_args_path = model_dir / "args.json"
+        model_args = read_config(model_args_path)
+        # initialize model
+        if model_args["context_args"].get("context_model", None) == "bidirectional_c3po":
+            model = BidirectionalC3PO()
+        else:
+            model = C3PO(**model_args)
+        return model, model_args, params
 
     def initialize_from_table_entry(self, init_key):
         from ..tables.dev_tables import C3POStorage
@@ -1378,6 +1413,77 @@ class C3poAnalysis:
         self.z = data["z"]
         self.c = data["c"]
         self.t = data["t"]
+
+    def save_params(self, file_path: Union[str, Path]):
+        """
+        Save the model parameters to a file.
+
+        Args:
+            file_path (str): Path to the file where the parameters will be saved.
+        """
+        save_params_hdf5(self.params, file_path)
+
+    def load_params(self, file_path: Union[str, Path]):
+        """
+        Load the model parameters from a file.
+
+        Args:
+            file_path (str): Path to the file from which the parameters will be loaded.
+        """
+        self.params = load_params_hdf5(file_path)
+
+
+    def save_model_args(self, file_path: Union[str, Path]):
+        """
+        Save the model initialization arguments to a hdmf file.
+
+        Args:
+            file_path (str): Path to the file where the arguments will be saved.
+        """
+        if self.model_args is None:
+            raise ValueError("Model arguments not set yet")
+        write_config(self.model_args, file_path)
+
+    def load_model_args(self, file_path: Union[str, Path]):
+        """
+        Load the model initialization arguments from a yaml file.
+
+        Args:
+            file_path (str): Path to the file from which the arguments will be loaded.
+        """
+        self.model_args = read_config(file_path)
+
+    def save_model(self, model_dir: Union[str, Path]):
+        """
+        Save the model parameters and embedded data to a directory.
+
+        Args:
+            model_dir (str): Path to the directory where the model will be saved.
+        """
+        model_dir = Path(model_dir)
+        model_dir.mkdir(parents=True, exist_ok=True)
+        embedding_path = model_dir / "embedding.npz"
+        params_path = model_dir / "params.hdf5"
+        args_path = model_dir / "args.json"
+        if any(p.exists() for p in [embedding_path, params_path, args_path]):
+            raise FileExistsError(f"Model directory {model_dir} already contains a model")
+        self.save_embedding(embedding_path)
+        self.save_params(params_path)
+        self.save_model_args(args_path)
+
+    def load_model(self, model_dir: Union[str, Path]):
+        """
+        Load the model parameters and embedded data from a directory.
+
+        Args:
+            model_dir (str): Path to the directory from which the model will be loaded.
+        """
+        model_dir = Path(model_dir)
+        self.load_embedding(model_dir / "embedding.npz")
+        self.load_params(model_dir / "params.hdf5")
+        self.load_model_args(model_dir / "args.json")
+
+
 
 
 def bootstrap_traces(
