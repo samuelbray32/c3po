@@ -213,10 +213,13 @@ class C3poAnalysis:
         params = load_params_hdf5(model_path)
         # load model args
         model_args_path = model_dir / "args.json"
+        if not model_args_path.is_file():
+            raise ValueError(f"args.json not found in {model_dir}.")
         model_args = read_config(model_args_path)
         # initialize model
-        if model_args["context_args"].get("context_model", None) == "bidirectional_c3po":
-            model = BidirectionalC3PO()
+        context_model = model_args.get("context_args", {}).get("context_model", None)
+        if context_model == "bidirectional_c3po":
+            model = BidirectionalC3PO(**model_args)
         else:
             model = C3PO(**model_args)
         return model, model_args, params
@@ -1435,7 +1438,7 @@ class C3poAnalysis:
 
     def save_model_args(self, file_path: Union[str, Path]):
         """
-        Save the model initialization arguments to a hdmf file.
+        Save the model initialization arguments to a JSON file.
 
         Args:
             file_path (str): Path to the file where the arguments will be saved.
@@ -1446,7 +1449,7 @@ class C3poAnalysis:
 
     def load_model_args(self, file_path: Union[str, Path]):
         """
-        Load the model initialization arguments from a yaml file.
+        Load the model initialization arguments from a JSON file.
 
         Args:
             file_path (str): Path to the file from which the arguments will be loaded.

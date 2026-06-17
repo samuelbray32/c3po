@@ -104,13 +104,8 @@ def _read_group(group: h5py.Group) -> dict[str, Any]:
 
 
 # --------------
-# argument params as json files
-from pathlib import Path
-from typing import Any
-
+# argument params as JSON files
 import json
-import numpy as np
-
 
 def make_json_serializable(value: Any) -> Any:
     """Convert Python/NumPy objects into JSON-serializable objects.
