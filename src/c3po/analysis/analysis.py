@@ -74,6 +74,7 @@ class C3poAnalysis:
         self.decode_pca = None
 
         self.projected_context = dict()
+        self.filtered_context = dict()
 
         if model_dir is not None:
             self.load_embedding(Path(model_dir) / "embedding.npz")
@@ -359,6 +360,7 @@ class C3poAnalysis:
         if self.pca is None:
             raise ValueError("pca must first be fit to data")
         self.c_pca_interp = None
+        self.filtered_context = dict()
         if True:  # self.c_pca is None:
             self.c_pca = np.ones_like(self.c) * np.nan
             ind_valid = (~np.isnan(self.c)).any(axis=1)
@@ -413,9 +415,47 @@ class C3poAnalysis:
             return self.projected_context[name]["data_interp"]
         return self.projected_context[name]["data"]
 
+    def add_band_filter(self, filter_name: str, filter_coeff: np.ndarray, n_jobs: int = 1):
+        """Add a band filter to the analysis.
+
+        Args:
+            filter_name (str): Name of the filter.
+            filter_coeff (np.ndarray): Filter coefficients.
+            n_jobs (int, optional): Number of jobs to use. Defaults to 1.
+        """
+        from c3po.analysis.band_filter import filter_data
+        if filter_name in self.filtered_context:
+            print(f"Filter {filter_name} already exists.")
+            return
+
+        self.filtered_context[filter_name] = filter_data(
+            self.t_interp,
+            self.c_pca_interp,
+            filter_coeff,
+            [[self.t_interp[0], self.t_interp[-1]]],
+            self.context_dim,
+            n_jobs
+        )
+
     # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
-    def _select_data(self, pca, interpolated, projection_name=None):
+    def _select_data(self, pca: bool, interpolated: bool, projection_name: str = None, filtered_context: dict =None):
+        """Returns data of desired type
+
+        Args:
+            pca (bool):
+            interpolated (bool): _description_
+            projection_name (str, optional): _description_. Defaults to None.
+            filtered_context (dict, optional): _description_. Defaults to None.
+
+        Raises:
+            ValueError: _description_
+            ValueError: _description_
+            ValueError: _description_
+
+        Returns:
+            _type_: _description_
+        """
         if projection_name is not None:
             if projection_name not in self.projected_context:
                 raise ValueError(f"Projection {projection_name} not found.")
@@ -425,6 +465,16 @@ class C3poAnalysis:
             else:
                 t_data = self.t
                 c_data = self.projected_context[projection_name]["data"]
+            return t_data, c_data
+        if filtered_context is not None:
+            filter_name = filtered_context["filter_name"]
+            feature = filtered_context["feature"]
+            if filter_name not in self.filtered_context:
+                raise ValueError(f"Filter {filter_name} not found.")
+            if feature not in ["signal","power", "phase"]:
+                raise ValueError("Filtered feature must be one of 'signal', 'power', or 'phase'.")
+            t_data = self.filtered_context[filter_name]["time"] # only use interpolated times in band filtering
+            c_data = self.filtered_context[filter_name][feature]
             return t_data, c_data
         if pca and interpolated:
             t_data = self.t_interp
@@ -707,6 +757,7 @@ class C3poAnalysis:
         pca=True,
         passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         projection_name: Optional[str] = None,
+        filtered_context: Optional[dict] = None,
         smooth_context: bool = False,
     ):
         """
@@ -717,6 +768,7 @@ class C3poAnalysis:
             t_plot (tuple(float,float)): Time window to plot around each mark time (ex. (-.1,.5)).
             pca (bool, optional): Use PCA context. Defaults to True.
             passed_data (Optional[Tuple[np.ndarray, np.ndarray]], optional): Passed data. Defaults to None.
+            filtered_context (Optional[dict], optional): Filtered context data. Defaults to None.
         """
 
         if passed_data is None:
@@ -739,7 +791,8 @@ class C3poAnalysis:
                 # c_data = self.c_pca_interp if pca else self.c_interp
                 # t_data = self.t_interp
                 t_data, c_data = self._select_data(
-                    pca=pca, interpolated=True, projection_name=projection_name
+                    pca=pca, interpolated=True, projection_name=projection_name,
+                    filtered_context=filtered_context
                 )
         else:
             c_data, t_data = passed_data
