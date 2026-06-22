@@ -19,118 +19,14 @@ from c3po.analysis.utils_io import (
     write_config,
     read_config,
 )
+from c3po.analysis.intervals import (
+    interval_list_contains,
+    interval_list_contains_ind,
+    interval_list_intersect,
+    interval_list_complement,
+)
 
 figure_directory = "/home/sambray/Documents/c3po/Figures/"
-
-
-def _is_sorted(arr):
-    return np.all(arr[:-1] <= arr[1:])
-
-
-def _interval_list_contains_ind_sorted(interval_list, timestamps):
-    ind = []
-    for interval in interval_list:
-        st = np.searchsorted(timestamps, interval[0], side="left")
-        en = np.searchsorted(timestamps, interval[1], side="right")
-        ind += list(range(st, en))
-    ind = np.unique(ind)
-    return np.asarray(ind)
-
-
-def interval_list_contains_ind(interval_list, timestamps):
-    """Find indices of list of timestamps contained in an interval list.
-
-    Parameters
-    ----------
-    interval_list : array_like
-        Each element is (start time, stop time), i.e. an interval in seconds.
-    timestamps : array_like
-    """
-    ind = []
-    if _is_sorted(timestamps):
-        return _interval_list_contains_ind_sorted(interval_list, timestamps)
-    for interval in interval_list:
-        ind += np.ravel(
-            np.argwhere(
-                np.logical_and(timestamps >= interval[0], timestamps <= interval[1])
-            )
-        ).tolist()
-    ind = np.unique(ind)
-    return np.asarray(ind)
-
-
-def interval_list_contains(interval_list, timestamps):
-    """Find timestamps that are contained in an interval list.
-
-    Parameters
-    ----------
-    interval_list : array_like
-        Each element is (start time, stop time), i.e. an interval in seconds.
-    timestamps : array_like
-    """
-    ind = interval_list_contains_ind(interval_list, timestamps)
-    if len(ind) == 0:
-        return np.array([])
-    return timestamps[ind]
-
-
-def interval_list_intersect(interval_list_1, interval_list_2):
-    """Find the intersection of two interval lists.
-
-    Parameters
-    ----------
-    interval_list_1 : array_like
-        Each element is (start time, stop time), i.e. an interval in seconds.
-    interval_list_2 : array_like
-        Each element is (start time, stop time), i.e. an interval in seconds.
-    """
-    intersected_intervals = []
-    for interval_1 in interval_list_1:
-        for interval_2 in interval_list_2:
-            start = max(interval_1[0], interval_2[0])
-            end = min(interval_1[1], interval_2[1])
-            if start < end:
-                intersected_intervals.append((start, end))
-    intersect = np.array(intersected_intervals)
-    # Handle the empty case explicitly to ensure shape (0, 2)
-    if intersect.size == 0:
-        return np.empty((0, 2), dtype=intersect.dtype)
-    # If there is exactly one interval, ensure shape (1, 2)
-    if intersect.ndim == 1 and intersect.shape[0] == 2:
-        intersect = intersect[None, :]
-    return intersect
-
-
-def interval_list_complement(intervals1, intervals2):
-    """
-    Finds intervals in `intervals1` that are not covered by any interval in `intervals2`.
-
-    Parameters
-    ----------
-    intervals1 : array_like
-        Each element is (start time, stop time), i.e. an interval in seconds.
-    intervals2 : array_like
-        Each element is (start time, stop time), i.e. an interval in seconds.
-    """
-    result = []
-    for start1, end1 in intervals1:
-        subtracted = [(start1, end1)]
-        for start2, end2 in intervals2:
-            new_subtracted = []
-            for s, e in subtracted:
-                if start2 <= s and e <= end2:
-                    continue
-                if e <= start2 or end2 <= s:
-                    new_subtracted.append((s, e))
-                    continue
-                if start2 > s:
-                    new_subtracted.append((s, start2))
-                if end2 < e:
-                    new_subtracted.append((end2, e))
-            subtracted = new_subtracted
-        result.extend(subtracted)
-    return np.array(result)
-
 
 class C3poAnalysis:
     def __init__(
@@ -178,6 +74,7 @@ class C3poAnalysis:
         self.decode_pca = None
 
         self.projected_context = dict()
+        self.filtered_context = dict()
 
         if model_dir is not None:
             self.load_embedding(Path(model_dir) / "embedding.npz")
@@ -207,6 +104,7 @@ class C3poAnalysis:
         new_analysis.decode_pca = self.decode_pca
 
         new_analysis.projected_context = self.projected_context.copy()
+        new_analysis.filtered_context = self.filtered_context.copy()
 
         return new_analysis
 
@@ -463,6 +361,7 @@ class C3poAnalysis:
         if self.pca is None:
             raise ValueError("pca must first be fit to data")
         self.c_pca_interp = None
+        self.filtered_context = dict()
         if True:  # self.c_pca is None:
             self.c_pca = np.ones_like(self.c) * np.nan
             ind_valid = (~np.isnan(self.c)).any(axis=1)
@@ -517,9 +416,48 @@ class C3poAnalysis:
             return self.projected_context[name]["data_interp"]
         return self.projected_context[name]["data"]
 
+    def add_band_filter(self, filter_name: str, filter_coeff: np.ndarray, n_jobs: int = 1):
+        """Add a band filter to the analysis.
+
+        Args:
+            filter_name (str): Name of the filter.
+            filter_coeff (np.ndarray): Filter coefficients.
+            n_jobs (int, optional): Number of jobs to use. Defaults to 1.
+        """
+        self._check_interpolated_data()
+        from c3po.analysis.band_filter import filter_data
+        if filter_name in self.filtered_context:
+            print(f"Filter {filter_name} already exists.")
+            return
+
+        self.filtered_context[filter_name] = filter_data(
+            self.t_interp,
+            self.c_pca_interp,
+            filter_coeff,
+            [[self.t_interp[0], self.t_interp[-1]]],
+            self.context_dim,
+            n_jobs
+        )
+
     # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
-    def _select_data(self, pca, interpolated, projection_name=None):
+    def _select_data(self, pca: bool, interpolated: bool, projection_name: str = None, filtered_context: dict =None):
+        """Returns data of desired type
+
+        Args:
+            pca (bool):
+            interpolated (bool): _description_
+            projection_name (str, optional): _description_. Defaults to None.
+            filtered_context (dict, optional): _description_. Defaults to None.
+
+        Raises:
+            ValueError: _description_
+            ValueError: _description_
+            ValueError: _description_
+
+        Returns:
+            _type_: _description_
+        """
         if projection_name is not None:
             if projection_name not in self.projected_context:
                 raise ValueError(f"Projection {projection_name} not found.")
@@ -529,6 +467,18 @@ class C3poAnalysis:
             else:
                 t_data = self.t
                 c_data = self.projected_context[projection_name]["data"]
+            return t_data, c_data
+        if filtered_context is not None:
+            if not all(key in filtered_context for key in ["filter_name", "feature"]):
+                raise ValueError("filtered_context must contain 'filter_name' and 'feature' keys.")
+            filter_name = filtered_context["filter_name"]
+            feature = filtered_context["feature"]
+            if filter_name not in self.filtered_context:
+                raise ValueError(f"Filter {filter_name} not found.")
+            if feature not in ["signal","power", "phase"]:
+                raise ValueError("Filtered feature must be one of 'signal', 'power', or 'phase'.")
+            t_data = self.filtered_context[filter_name]["time"] # only use interpolated times in band filtering
+            c_data = self.filtered_context[filter_name][feature]
             return t_data, c_data
         if pca and interpolated:
             t_data = self.t_interp
@@ -811,6 +761,7 @@ class C3poAnalysis:
         pca=True,
         passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         projection_name: Optional[str] = None,
+        filtered_context: Optional[dict] = None,
         smooth_context: bool = False,
     ):
         """
@@ -821,6 +772,7 @@ class C3poAnalysis:
             t_plot (tuple(float,float)): Time window to plot around each mark time (ex. (-.1,.5)).
             pca (bool, optional): Use PCA context. Defaults to True.
             passed_data (Optional[Tuple[np.ndarray, np.ndarray]], optional): Passed data. Defaults to None.
+            filtered_context (Optional[dict], optional): Filtered context data. Defaults to None.
         """
 
         if passed_data is None:
@@ -843,7 +795,8 @@ class C3poAnalysis:
                 # c_data = self.c_pca_interp if pca else self.c_interp
                 # t_data = self.t_interp
                 t_data, c_data = self._select_data(
-                    pca=pca, interpolated=True, projection_name=projection_name
+                    pca=pca, interpolated=True, projection_name=projection_name,
+                    filtered_context=filtered_context
                 )
         else:
             c_data, t_data = passed_data
