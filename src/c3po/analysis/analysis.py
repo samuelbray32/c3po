@@ -104,6 +104,7 @@ class C3poAnalysis:
         new_analysis.decode_pca = self.decode_pca
 
         new_analysis.projected_context = self.projected_context.copy()
+        new_analysis.filtered_context = self.filtered_context.copy()
 
         return new_analysis
 
@@ -423,6 +424,7 @@ class C3poAnalysis:
             filter_coeff (np.ndarray): Filter coefficients.
             n_jobs (int, optional): Number of jobs to use. Defaults to 1.
         """
+        self._check_interpolated_data()
         from c3po.analysis.band_filter import filter_data
         if filter_name in self.filtered_context:
             print(f"Filter {filter_name} already exists.")
@@ -467,6 +469,8 @@ class C3poAnalysis:
                 c_data = self.projected_context[projection_name]["data"]
             return t_data, c_data
         if filtered_context is not None:
+            if not all(key in filtered_context for key in ["filter_name", "feature"]):
+                raise ValueError("filtered_context must contain 'filter_name' and 'feature' keys.")
             filter_name = filtered_context["filter_name"]
             feature = filtered_context["feature"]
             if filter_name not in self.filtered_context:

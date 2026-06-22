@@ -106,4 +106,9 @@ def interval_list_complement(intervals1, intervals2):
                     new_subtracted.append((end2, e))
             subtracted = new_subtracted
         result.extend(subtracted)
-    return np.array(result)
+    result = np.array(result)
+    if result.size == 0:
+        return np.empty((0, 2), dtype=result.dtype)
+    if result.ndim == 1 and result.shape[0] == 2:
+        result = result[None, :]
+    return result
