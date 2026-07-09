@@ -225,9 +225,14 @@ class EmbeddedSortedWaveform(SpyglassMixin, dj.Computed):
         }
         self.insert1(new_key)
 
-    def fetch1_dataframe(self, key):
+    def fetch1_dataframe(self, key=dict()):
         if not len(self & key) == 1:
             raise ValueError(
                 f"Expected one entry for key {key}, found {len(self & key)}"
             )
         return (self & key).fetch_nwb()[0]["embedded_waveform"]
+
+    def fetch_dataframe(self):
+        results = [nwb["embedded_waveform"] for nwb in self.fetch_nwb()]
+        return pd.concat(results, axis=0)
+
