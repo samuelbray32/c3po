@@ -20,20 +20,9 @@ class BaseEncoder(nn.Module):
         """Indicates whether the encoder requires a random key for its operations."""
         return False
 
-
 def encoder_factory(encoder_model: str, latent_dim: int, **kwargs) -> BaseEncoder:
-    if encoder_model == "simple":
-        return SimpleEncoder(latent_dim=latent_dim, **kwargs)
-    if encoder_model == "convolutional1D":
-        return convolutionalEncoder1D(latent_dim=latent_dim, **kwargs)
-    if encoder_model == "multi_shank_v0":
-        return MultiShankEncoderV0(latent_dim=latent_dim, **kwargs)
-    if encoder_model == "multi_shank_v1":
-        return MultiShankEncoderV1(latent_dim=latent_dim, **kwargs)
-    if encoder_model == "sorted_spikes":
-        return SortedSpikesEncoder(latent_dim=latent_dim, **kwargs)
-    if encoder_model == "identity":
-        return IdentityEncoder(latent_dim=latent_dim, **kwargs)
+    if encoder_model in model_dict:
+        return model_dict[encoder_model](latent_dim=latent_dim, **kwargs)
     else:
         raise ValueError(f"Unknown encoder model: {encoder_model}")
 
@@ -152,16 +141,7 @@ class MultiShankEncoderV1(BaseEncoder):
         # Separate the data part (all but last channel) from the integer shank indicator
         x_data = x[..., :-1]  # shape: (batch_size, n_channels)
         x_shank = x[..., -1].astype(int)  # shape: (batch_size,)
-
         batch_size, _ = x_data.shape
-
-        # outputs = []
-        # for x_i, shank_i in zip(x_data, x_shank):
-        #     encoded_data = nn.switch(shank_i, self.expanded_shank_encoders, self, x_i)
-
-        #     outputs.append(encoded_data)
-        # outputs = jnp.stack(outputs, axis=0)
-        # return outputs
 
         # Prepare an output array to store latent vectors of shape (batch_size, latent_dim)
         outputs = jnp.zeros(
@@ -185,6 +165,54 @@ class MultiShankEncoderV1(BaseEncoder):
             # Scatter the encoded data back
             outputs = outputs.at[idxs].set(encoded_data)
         return outputs[:-1]
+
+class HybridEncoder(BaseEncoder):
+    """makes a separate encoder model for clustered and unclustered spikes then combines
+
+    Data is assumed to be of shape (batch_size, n_channels+2)
+    The last two channels are assumed to be:
+        - shank indicator (integer, any value acceptable for sorted marks)
+        - cluster indicator (-1 for unclustered, 1 for clustered)
+
+    """
+
+    latent_dim: int
+    sorted_encoder_params: dict
+    clusterless_encoder_params: dict
+
+    def setup(self):
+        self.sorted_encoder = encoder_factory(**self.sorted_encoder_params, latent_dim=self.latent_dim)
+        self.clusterless_encoder = encoder_factory(**self.clusterless_encoder_params, latent_dim=self.latent_dim)
+
+    def __call__(self, x):
+        # x has shape (batch_size, n_channels+1)
+        print("x shape", x.shape)
+        # Separate the data part (all but last channel) from the integer shank indicator
+        x_data = x[..., :-1]  # shape: (batch_size, n_channels+1)
+        x_sort_id = x[..., -1].astype(int)  # shape: (batch_size,)
+        x_sort_id = x_sort_id[..., None]  # shape: (batch_size, 1)
+
+        batch_size, _ = x_data.shape
+
+        # Prepare an output array to store latent vectors of shape (batch_size, latent_dim)
+        outputs = jnp.zeros(
+            (batch_size + 1, self.latent_dim), dtype=x_data.dtype
+        )  # last index is a garbage slot
+
+        # embed the sorted spikes
+        ind_sorted = jnp.where(x_sort_id >= 0, size=batch_size, fill_value=-1)[0]
+        data_sorted = x_sort_id[ind_sorted]
+        encoded_sorted = self.sorted_encoder(data_sorted)
+        outputs = outputs.at[ind_sorted].set(encoded_sorted)
+
+        # embed the clusterless spikes
+        ind_clusterless = jnp.where(x_sort_id == -1, size=batch_size, fill_value=-1)[0]
+        data_clusterless = x_data[ind_clusterless,:-1]
+        encoded_clusterless = self.clusterless_encoder(data_clusterless)
+        outputs = outputs.at[ind_clusterless].set(encoded_clusterless)
+
+        return outputs[:-1]
+
 
 
 class SortedSpikesEncoder(BaseEncoder):
@@ -240,3 +268,14 @@ class IdentityEncoder(BaseEncoder):
             )
         # Simply return the input as is
         return jnp.array(x)
+
+
+model_dict = {
+    "simple": SimpleEncoder,
+    "convolutional1D": convolutionalEncoder1D,
+    "multi_shank_v0": MultiShankEncoderV0,
+    "multi_shank_v1": MultiShankEncoderV1,
+    "sorted_spikes": SortedSpikesEncoder,
+    "identity": IdentityEncoder,
+    "hybrid": HybridEncoder,
+}
