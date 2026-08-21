@@ -78,7 +78,14 @@ class DiscretizedRegression:
 
         self.model.fit(X, y_binned)
 
-    def predict(self, X):
+    def _observed_bin_centers(self):
+        bin_centers = (
+            self.discretizer.bin_edges_[0][:-1] + self.discretizer.bin_edges_[0][1:]
+        ) / 2
+        return bin_centers[self.model.classes_.astype(int)]
+
+
+    def predict(self, X, return_posterior=False):
         # y_binned_pred = self.model.predict(X)
         # return self.discretizer.inverse_transform(y_binned_pred[:, None])
         y_binned_probs = self.model.predict_proba(X)
@@ -86,9 +93,10 @@ class DiscretizedRegression:
             ordinal_pred = self.model.predict(X)
             return self.discretizer.inverse_transform(ordinal_pred[:, None])
 
-        bin_centers = (
-            self.discretizer.bin_edges_[0][:-1] + self.discretizer.bin_edges_[0][1:]
-        ) / 2
+        # bin_centers = (
+        #     self.discretizer.bin_edges_[0][:-1] + self.discretizer.bin_edges_[0][1:]
+        # ) / 2
+        bin_centers = self._observed_bin_centers()
         if self.predict_method == "weighted":
             y_pred = np.dot(y_binned_probs, bin_centers)
         elif self.predict_method == "peak":
@@ -101,7 +109,8 @@ class DiscretizedRegression:
             raise ValueError(
                 f"Unknown predict_method: {self.predict_method}. Choose 'weighted', 'peak', or 'weighted_angle'."
             )
-
+        if return_posterior:
+            return y_pred[:, None], (y_binned_probs, self.discretizer.bin_edges_[0])
         return y_pred[:, None]
 
 
