@@ -4,6 +4,10 @@ Unsupervised model to infer latent generative processes from point processes occ
 in $\mathbb{R}^d$ spcae. Developed with focus for inferring neural states from waveform
 features of unclustered spike events.
 
+Analysis associated with the publication "Learning predictive latent structure from
+unclustered neural spike trains" available at the
+[publication repository](https://github.com/samuelbray32/c3po_publication)
+
 ## Usage
 
 ### Model declaration

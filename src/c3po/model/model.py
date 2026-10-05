@@ -753,9 +753,19 @@ def train_epoch(
             params = optax.apply_updates(params, updates)
             j += batch_size
 
+            loss_val = np.mean(epoch_loss)
+            pos_prob = jnp.exp(-loss_val)
+            rand_prob = 1 / (1 + n_neg)
+            rand_prob = f"{rand_prob:.4f}"
+            pos_prob = f"{pos_prob:.4f}"
+
             pbar.update(batch_size)
             pbar.set_postfix(
-                loss=np.mean(epoch_loss), n_neg=n_neg, batch_size=batch_size
+                loss=loss_val,
+                n_neg=n_neg,
+                batch_size=batch_size,
+                pos_prob=pos_prob,
+                rand_prob=rand_prob,
             )
 
     average_epoch_loss = np.mean(epoch_loss)
@@ -890,9 +900,16 @@ def train_epoch_multi_gpu(
 
             j += total_batch_size
 
+            loss_val = np.mean(epoch_loss)
+            pos_prob = jnp.exp(-loss_val)
+            rand_prob = 1 / (1 + n_neg)
             pbar.update(total_batch_size)
             pbar.set_postfix(
-                loss=np.mean(epoch_loss), n_neg=n_neg, batch_size=batch_size
+                loss=loss_val,
+                n_neg=n_neg,
+                batch_size=batch_size,
+                pos_prob=f"{pos_prob:.3f}",
+                rand_prob=f"{rand_prob:.3f}",
             )
 
     merged_params = jax.tree_util.tree_map(lambda x: x[0], split_params)
