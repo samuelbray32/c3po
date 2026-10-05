@@ -28,6 +28,7 @@ from c3po.analysis.intervals import (
 
 figure_directory = "/home/sambray/Documents/c3po/Figures/"
 
+
 class C3poAnalysis:
     def __init__(
         self,
@@ -79,6 +80,19 @@ class C3poAnalysis:
         if model_dir is not None:
             self.load_embedding(Path(model_dir) / "embedding.npz")
 
+    @staticmethod
+    def _copy_array_link_h5(x):
+        import h5py
+
+        if x is None:
+            return None
+        elif isinstance(x, np.ndarray):
+            return x.copy()
+        elif isinstance(x, h5py.Dataset):
+            return x
+        else:
+            raise ValueError(f"Cannot copy object of type {type(x)}")
+
     def copy(self):
         new_analysis = C3poAnalysis(
             model=self.model,
@@ -86,9 +100,9 @@ class C3poAnalysis:
             params=self.params,
         )
 
-        new_analysis.z = None if self.z is None else self.z.copy()
-        new_analysis.c = None if self.c is None else self.c.copy()
-        new_analysis.t = None if self.t is None else self.t.copy()
+        new_analysis.z = self._copy_array_link_h5(self.z)
+        new_analysis.c = self._copy_array_link_h5(self.c)
+        new_analysis.t = self._copy_array_link_h5(self.t)
         new_analysis.t_interp = None if self.t_interp is None else self.t_interp.copy()
         new_analysis.c_interp = None if self.c_interp is None else self.c_interp.copy()
         new_analysis.c_pca = None if self.c_pca is None else self.c_pca.copy()
@@ -233,7 +247,7 @@ class C3poAnalysis:
 
         i = chunk_padding
 
-        if chunk_data:
+        if chunk_data and x.shape[1] > chunk_size:
             pbar = tqdm(total=x.shape[1])
             while i < (x.shape[1] - chunk_size):
                 z_i, c_i = embed_chunk(
@@ -244,15 +258,26 @@ class C3poAnalysis:
                 c[i : i + chunk_size] = c_i[0, chunk_padding:]
                 i += chunk_size
                 pbar.update(chunk_size)
+            # embed the last chunk
+            n_time = x.shape[1]
+            start = max(0, i - chunk_padding)
+            offset = i - start
+            z_i, c_i = embed_chunk(
+                x[:, start:],
+                delta_t[:, start:],
+            )
+
+            z[i:] = z_i[0, offset:]
+            c[i:] = c_i[0, offset:]
             pbar.close()
         else:
-            z, c = embed_chunk(x[None, ...], delta_t[None, ...])
+            z, c = embed_chunk(x, delta_t)
             z = np.array(z[0])
             c = np.array(c[0])
             z[:chunk_padding] = np.nan
             c[:chunk_padding] = np.nan
 
-        # store the markls times in unix time
+        # store the mark times in unix time
         t = np.cumsum(delta_t)
         if delta_t_units == "ms":
             t *= 1e-3
@@ -341,7 +366,9 @@ class C3poAnalysis:
         projection = self.c @ axis
         self.c = self.c - np.outer(projection, axis)
 
-    def fit_context_pca(self, fit_intervals=None, interpolated=False):
+    def fit_context_pca(
+        self, fit_intervals=None, interpolated=False, n_components=None
+    ):
         self._check_embedded_data()
         if fit_intervals is None:
             fit_intervals = np.array([[self.t[0], self.t[-1]]])
@@ -351,7 +378,9 @@ class C3poAnalysis:
         fit_ind = interval_list_contains_ind(fit_intervals, t)
         data = data[fit_ind]
         data = data[~np.isnan(data).any(axis=1)]
-        pca = PCA(n_components=self.context_dim)
+        pca = PCA(
+            n_components=n_components if n_components is not None else self.context_dim
+        )
         pca.fit(data)
         self.pca = pca
         self.pca_intervals = fit_intervals
@@ -363,11 +392,13 @@ class C3poAnalysis:
         self.c_pca_interp = None
         self.filtered_context = dict()
         if True:  # self.c_pca is None:
-            self.c_pca = np.ones_like(self.c) * np.nan
+            self.c_pca = np.ones((self.c.shape[0], self.pca.n_components)) * np.nan
             ind_valid = (~np.isnan(self.c)).any(axis=1)
             self.c_pca[ind_valid] = self.pca.transform(self.c[ind_valid])
         if self.c_interp is not None and self.c_pca_interp is None:
-            self.c_pca_interp = np.ones_like(self.c_interp) * np.nan
+            self.c_pca_interp = (
+                np.ones((self.c_interp.shape[0], self.pca.n_components)) * np.nan
+            )
             ind_valid = (~np.isnan(self.c_interp)).any(axis=1)
             self.c_pca_interp[ind_valid] = self.pca.transform(self.c_interp[ind_valid])
 
@@ -416,7 +447,9 @@ class C3poAnalysis:
             return self.projected_context[name]["data_interp"]
         return self.projected_context[name]["data"]
 
-    def add_band_filter(self, filter_name: str, filter_coeff: np.ndarray, n_jobs: int = 1):
+    def add_band_filter(
+        self, filter_name: str, filter_coeff: np.ndarray, n_jobs: int = 1
+    ):
         """Add a band filter to the analysis.
 
         Args:
@@ -426,6 +459,7 @@ class C3poAnalysis:
         """
         self._check_interpolated_data()
         from c3po.analysis.band_filter import filter_data
+
         if filter_name in self.filtered_context:
             print(f"Filter {filter_name} already exists.")
             return
@@ -436,12 +470,18 @@ class C3poAnalysis:
             filter_coeff,
             [[self.t_interp[0], self.t_interp[-1]]],
             self.context_dim,
-            n_jobs
+            # n_jobs
         )
 
     # ----------------------------------------------------------------------------------
     # Latent factor interpretation tools
-    def _select_data(self, pca: bool, interpolated: bool, projection_name: str = None, filtered_context: dict =None):
+    def _select_data(
+        self,
+        pca: bool,
+        interpolated: bool,
+        projection_name: str = None,
+        filtered_context: dict = None,
+    ):
         """Returns data of desired type
 
         Args:
@@ -470,14 +510,20 @@ class C3poAnalysis:
             return t_data, c_data
         if filtered_context is not None:
             if not all(key in filtered_context for key in ["filter_name", "feature"]):
-                raise ValueError("filtered_context must contain 'filter_name' and 'feature' keys.")
+                raise ValueError(
+                    "filtered_context must contain 'filter_name' and 'feature' keys."
+                )
             filter_name = filtered_context["filter_name"]
             feature = filtered_context["feature"]
             if filter_name not in self.filtered_context:
                 raise ValueError(f"Filter {filter_name} not found.")
-            if feature not in ["signal","power", "phase"]:
-                raise ValueError("Filtered feature must be one of 'signal', 'power', or 'phase'.")
-            t_data = self.filtered_context[filter_name]["time"] # only use interpolated times in band filtering
+            if feature not in ["signal", "power", "phase"]:
+                raise ValueError(
+                    "Filtered feature must be one of 'signal', 'power', or 'phase'."
+                )
+            t_data = self.filtered_context[filter_name][
+                "time"
+            ]  # only use interpolated times in band filtering
             c_data = self.filtered_context[filter_name][feature]
             return t_data, c_data
         if pca and interpolated:
@@ -568,6 +614,7 @@ class C3poAnalysis:
         jitter_feature_sigma=None,
         jitter_feature_n=None,
         passed_data: Optional[Tuple[np.ndarray, np.ndarray]] = None,
+        projection_name=None,
     ):
         """
         Bin the context by co-occurring feature values
@@ -577,8 +624,16 @@ class C3poAnalysis:
             feature_1_times (np.ndarray): Times of the feature values. Shape (n_samples,).
             feature_2 (np.ndarray): Feature values. Shape (n_samples,).
             feature_2_times (np.ndarray): Times of the feature values. Shape (n_samples,).
-            bins (int, optional): Number of bins to use. Defaults to None.
+            bins_1 (int, optional): Number of bins to use for feature 1. Defaults to None.
+            bins_2 (int, optional): Number of bins to use for feature 2. Defaults to None.
             valid_intervals (np.ndarray, optional): Intervals to consider. Defaults to None.
+            pca (bool, optional): Whether to use PCA context. Defaults to False.
+            interpolated (bool, optional): Whether to use interpolated context. Defaults to False.
+            return_counts (bool, optional): Whether to return counts of each bin. Defaults to False.
+            jitter_feature_sigma (float, optional): Standard deviation of Gaussian noise to add to features for jittering. Defaults to None.
+            jitter_feature_n (int, optional): Number of times to jitter each feature. Defaults to None.
+            passed_data (tuple of np.ndarray, optional): Pre-selected data to use instead of selecting from self. Defaults to None.
+            projection_name (str, optional): Name of the data projection to use. Defaults to None.
 
         Returns:
             context_binned (list of list of np.ndarray): Binned context. Shape (n_bins_1, n_bins_2).
@@ -590,7 +645,9 @@ class C3poAnalysis:
             t_data, c_data = passed_data
         else:
             self._check_embedded_data()
-            t_data, c_data = self._select_data(pca, interpolated)
+            t_data, c_data = self._select_data(
+                pca, interpolated, projection_name=projection_name
+            )
         if valid_intervals is None:
             valid_intervals = np.array(
                 [
@@ -795,8 +852,10 @@ class C3poAnalysis:
                 # c_data = self.c_pca_interp if pca else self.c_interp
                 # t_data = self.t_interp
                 t_data, c_data = self._select_data(
-                    pca=pca, interpolated=True, projection_name=projection_name,
-                    filtered_context=filtered_context
+                    pca=pca,
+                    interpolated=True,
+                    projection_name=projection_name,
+                    filtered_context=filtered_context,
                 )
         else:
             c_data, t_data = passed_data
@@ -919,14 +978,44 @@ class C3poAnalysis:
         return frequencies, np.array(mid), np.array(lo), np.array(hi)
 
     def cross_correlation(
-        self, pca=True, max_lag_seconds=1.0, intervals=None, dim_limit=None, processes=1
+        self,
+        pca=True,
+        max_lag_seconds=1.0,
+        intervals=None,
+        dim_limit=None,
+        processes=1,
+        filtered_context=None,
+        smooth_context: int = False,
     ):
-        t, c = self._select_data(pca, interpolated=True)
+        """
+        Compute the cross-correlation of the context dimensions
+
+        Args:
+            pca (bool, optional): Whether to use PCA context. Defaults to True.
+            max_lag_seconds (float, optional): Maximum lag in seconds. Defaults to 1.0.
+            intervals (_type_, optional): Intervals of time to consider. Defaults to None.
+            dim_limit (_type_, optional): Maximum number of dimensions to consider. Defaults to None.
+            processes (int, optional): Number of processes to use. Defaults to 1.
+            filtered_context (_type_, optional): Whether to use filtered context. Defaults to None.
+            smooth_context (int, optional): Amount of smoothing to apply to the context. Defaults to False.
+
+        Returns:
+            _type_: _description_
+        """
+        t, c = self._select_data(
+            pca, interpolated=True, filtered_context=filtered_context
+        )
+        if smooth_context:
+            t, c = self._smooth_context(
+                pca=pca, interpolated=True, sigma=smooth_context
+            )
+
         ind_valid = (~np.isnan(c)).any(axis=1)
         t = t[ind_valid]
         c = c[ind_valid, :]
 
-        fs = np.mean(np.diff(t)) ** -1
+        fs = np.median(np.diff(t[:1000])) ** -1
+        print(f"Sampling frequency: {fs:.2f} Hz")
         max_lag = int(max_lag_seconds * fs)
         from scipy.signal import correlate
 
@@ -945,37 +1034,8 @@ class C3poAnalysis:
                     cross_corrs[i, j, :] = _single_cross_correlation(
                         c, t, i, j, intervals, max_lag
                     )[0]
-                # corr_ij = []
-                # weights = []
-                # for interval in intervals:
-                #     ind = np.where(np.logical_and(t >= interval[0], t <= interval[1]))[
-                #         0
-                #     ]
-                #     if len(ind) < max_lag * 2:
-                #         continue
-                #     c_i = c[ind, i]
-                #     c_j = c[ind, j]
-                #     corr_full = correlate(
-                #         c_i - np.mean(c_i), c_j - np.mean(c_j), mode="full"
-                #     )
-                #     mid = len(corr_full) // 2
-                #     corr_ij.append(corr_full[mid - max_lag : mid + max_lag + 1])
-                #     weights.append(len(c_i) - max_lag)
-                # cross_corrs[i, j, :] = np.average(corr_ij, axis=0, weights=weights)
 
         else:
-            # with Pool(processes=processes) as pool:
-            #     args = []
-            #     for i in range(n_dim):
-            #         for j in range(n_dim):
-            #             args.append((c, t, i, j, intervals, max_lag))
-            #     results = []
-            #     for r in tqdm(pool.imap_unordered(_single_cross_correlation, args)):
-            #         results.append(r)
-            #     for idx, result in enumerate(results):
-            #         i = result[1]
-            #         j = result[2]
-            #         cross_corrs[i, j, :] = result[0]
             args = []
             for i in range(n_dim):
                 for j in range(n_dim):
@@ -1027,30 +1087,110 @@ class C3poAnalysis:
         store_kwargs.update(store_kwargs.pop("kwargs"))
         self._decoder_kwargs = store_kwargs
 
+        self.normalize_decode_context = kwargs.pop("normalize_decode_context", False)
         self.feature_prediction_delay = feature_prediction_delay
         self.decoder_model = None
         if isinstance(model_type, str):
             if model_type == "knn":
                 from sklearn.neighbors import KNeighborsRegressor
 
+                self.decode_posterior = False
                 self.decoder_model = KNeighborsRegressor(**kwargs)
-            if model_type == "circular_knn":
+            elif model_type == "circular_knn":
                 from .decoder_models import CircularKNNRegressor
 
+                self.decode_posterior = False
                 self.decoder_model = CircularKNNRegressor(**kwargs)
+            elif model_type == "posterior_knn":
+                from .decoder_models import PosteriorKNN
+
+                self.decode_posterior = True
+                self.decoder_model = PosteriorKNN(**kwargs)
+            elif model_type == "eric_decoder":
+                from .decoder_models_eric import EricBasedDecoder
+
+                self.decode_posterior = True
+                self.decoder_model = EricBasedDecoder(**kwargs)
 
             elif model_type == "linear":
                 from sklearn.linear_model import LinearRegression
 
+                self.decode_posterior = False
                 self.decoder_model = LinearRegression(**kwargs)
 
             elif model_type == "discretized_regression":
                 from .decoder_models import DiscretizedRegression
 
+                self.decode_posterior = True
                 self.decoder_model = DiscretizedRegression(**kwargs)
 
             else:
                 raise ValueError(f"Unknown model type {model_type}")
+
+    def fit_decoder_spike_weighted(
+        self,
+        feature_values,
+        feature_times,
+        intervals=None,
+        pca=True,
+        decode_dim: slice = slice(None),
+        interpolate=False,
+        smooth_context: int = None,
+    ):
+        """
+        Fit the decoder model to predict the given feature values from the context, weighted by spike times.
+
+        Parameters:
+        ----------
+            feature_values (np.ndarray): Feature values to predict. Shape (n_samples, n_features).
+            feature_times (np.ndarray): Times of the feature values. Shape (n_samples,).
+            spike_times (np.ndarray): Times of spikes to weight the fitting. Shape (n_spikes,).
+            intervals (np.ndarray, optional): Time intervals to consider for fitting. Defaults to None.
+            pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
+            decode_dim (slice, optional): Dimensions of the context to use for decoding. Defaults to slice(None) (use all dimensions).
+            interpolate (bool, optional): Whether to use interpolated context data. Defaults to False.
+            smooth_context (int, optional): If not None, apply Gaussian smoothing to the context with the given sigma. Defaults to None.
+
+        Returns:
+        ----------
+            None
+        """
+        if self.decoder_model is None:
+            raise ValueError("Decoder model not initialized")
+
+        # get context data
+        self._check_embedded_data()
+        if smooth_context:
+            t_data, c_data = self._smooth_context(
+                pca=pca, interpolated=interpolate, sigma=smooth_context
+            )
+        else:
+            t_data, c_data = self._select_data(pca, interpolated=interpolate)
+        c_data = c_data[:, decode_dim]
+
+        if intervals is not None:
+            ind_valid = interval_list_contains_ind(intervals, t_data)
+            c_data = c_data[ind_valid]
+            t_data = t_data[ind_valid]
+
+        ind = np.where(~np.isnan(c_data).any(axis=1))[0]
+        c_data = c_data[ind]
+        t_data = t_data[ind]
+
+        ind_feature = np.digitize(t_data, feature_times) - 1
+        ind_feature = ind_feature[
+            np.logical_and(ind_feature >= 0, ind_feature < feature_values.shape[0])
+        ]
+        feature_values = feature_values[ind_feature]
+
+        ind = np.where(~np.isnan(feature_values).any(axis=1))[0]
+        c_data = c_data[ind]
+        t_data = t_data[ind]
+        feature_values = feature_values[ind]
+
+        self.decoder_model.fit(c_data, feature_values)
+        self.decode_pca = pca
+        self.decode_dim = decode_dim
 
     def fit_decoder(
         self,
@@ -1097,6 +1237,9 @@ class C3poAnalysis:
         else:
             t_data, c_data = self._select_data(pca, interpolated=interpolate)
         c_data = c_data[:, decode_dim]
+
+        if self.normalize_decode_context:
+            c_data = c_data / np.linalg.norm(c_data, axis=1, keepdims=True)
 
         # Get feature data
         feature_times = feature_times.copy() - self.feature_prediction_delay
@@ -1198,7 +1341,14 @@ class C3poAnalysis:
         self.decode_pca = pca
         self.decode_dim = decode_dim
 
-    def predict_decoder(self, interval, interpolate=False, smooth_context: int = None):
+    def predict_decoder(
+        self,
+        interval,
+        interpolate=False,
+        smooth_context: int = None,
+        return_posterior=False,
+        **kwargs,
+    ):
         """Predict feature values for the given time interval using the fitted decoder model.
 
         Parameters:
@@ -1214,6 +1364,8 @@ class C3poAnalysis:
         self._check_embedded_data()
         if self.decoder_model is None:
             raise ValueError("Decoder model not initialized")
+        if return_posterior and (not self.decode_posterior):
+            raise ValueError("Decoder model does not support posterior predictions")
 
         if smooth_context:
             t_data, c_data = self._smooth_context(
@@ -1225,6 +1377,8 @@ class C3poAnalysis:
             )
 
         c_data = c_data[:, self.decode_dim]
+        if self.normalize_decode_context:
+            c_data = c_data / np.linalg.norm(c_data, axis=1, keepdims=True)
 
         ind = np.where(np.logical_and(t_data >= interval[0], t_data <= interval[1]))[0]
         if len(ind) == 0:
@@ -1232,8 +1386,14 @@ class C3poAnalysis:
         ind = ind[~np.isnan(c_data[ind]).any(axis=1)]
         if len(ind) == 0:
             return np.array([]), np.array([])
+        if return_posterior:
+            return t_data[
+                ind
+            ] + self.feature_prediction_delay, self.decoder_model.predict(
+                c_data[ind], return_posterior=True, **kwargs
+            )
         return t_data[ind] + self.feature_prediction_delay, self.decoder_model.predict(
-            c_data[ind]
+            c_data[ind], **kwargs
         )
 
     def cross_validated_decoding(
@@ -1249,6 +1409,7 @@ class C3poAnalysis:
         balance_features=False,
         balance_features_bins=10,
         balance_features_min_count: int = 50,
+        return_posterior=False,
     ):
         """Method to generate x-fold cross-validated decoding predictions for the given
         feature values and times. Uses the fit_decoder and predict_decoder methods
@@ -1261,6 +1422,13 @@ class C3poAnalysis:
             cross_fold (int, optional): Number of folds for cross-validation. Defaults to 5.
             intervals (np.ndarray, optional): Time intervals to use for fitting and predicting. Defaults to None.
             pca (bool, optional): Whether to use PCA for dimensionality reduction. Defaults to True.
+            decode_dim (slice, optional): Dimensions of the context to use for decoding. Defaults to slice(None) (use all dimensions).
+            interpolate (bool, optional): Whether to use interpolated context data. Defaults to False.
+            smooth_context (int, optional): If not None, apply Gaussian smoothing to the context with the given sigma. Defaults to None.
+            balance_features (bool, optional): Whether to balance the feature values across bins. Defaults to False.
+            balance_features_bins (int, optional): Number of bins to use for balancing the feature values. Defaults to 10.
+            balance_features_min_count (int, optional): Minimum number of samples per bin when balancing feature values. Defaults to 50.
+            return_posterior (bool, optional): Whether to return the posterior probabilities. Defaults to False.
 
         Returns:
         ----------
@@ -1325,6 +1493,7 @@ class C3poAnalysis:
                 [predict_interval[0][0], predict_interval[0][1]],
                 interpolate=interpolate,
                 smooth_context=smooth_context,
+                return_posterior=return_posterior,
             )
             predictions.append(pred)
             prediction_times.append(t_pred)
@@ -1469,6 +1638,37 @@ def bootstrap_traces(
         np.percentile(bootstrap, (100 - conf_interval) / 2, axis=0),
         np.percentile(bootstrap, conf_interval + (100 - conf_interval) / 2, axis=0),
     ]
+
+
+def bootstrap_confidence_interval(
+    data, num_bootstrap_samples=1000, confidence_level=0.95
+):
+    """
+    Compute the bootstrap confidence interval for the mean of the data.
+
+    Parameters:
+        data (array-like): The input data.
+        num_bootstrap_samples (int): Number of bootstrap samples to generate.
+        confidence_level (float): The desired confidence level (between 0 and 1).
+    Returns:
+        tuple: Lower and upper bounds of the confidence interval.
+    """
+    means = []
+    n = len(data)
+
+    inds = np.arange(n)
+    for _ in range(num_bootstrap_samples):
+        # Generate a bootstrap sample by sampling with replacement
+        bootstrap_sample = np.random.choice(inds, size=n, replace=True)
+        means.append(np.mean(data[bootstrap_sample], axis=0))
+
+    # Calculate the lower and upper percentiles for the confidence interval
+    lower_percentile = (1 - confidence_level) / 2 * 100
+    upper_percentile = (1 + confidence_level) / 2 * 100
+    lower_bound = np.nanpercentile(means, lower_percentile, axis=0)
+    upper_bound = np.nanpercentile(means, upper_percentile, axis=0)
+
+    return lower_bound, upper_bound
 
 
 def weighted_quantile(

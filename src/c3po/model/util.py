@@ -44,7 +44,6 @@ def prep_training_data(
         x_train.append(x[0, i - sample_length : i])
         delta_t_train.append(delta_t[0, i - sample_length : i])
         i += int(sample_length * (1 - overlap_fraction))
-        print(i)
     x_train = np.array(x_train)
     delta_t_train = np.array(delta_t_train)
 
@@ -242,9 +241,6 @@ def causal_smoothing(x, filter_size=10, decay=None):
     pad_width = filter_size - 1  # Causal padding amount
     # Pad input with zeros on the left
     x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="constant")
-
-    # window = jnp.ones((filter_size, x.shape[-1])) / filter_size
-    # x = jax.lax.conv_general_dilated(x_padded, window, padding="VALID",window_strides=1)
 
     if decay is None:
         window = jnp.ones((filter_size,)) / filter_size
