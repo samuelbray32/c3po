@@ -1,9 +1,14 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
 from sklearn.neighbors import KNeighborsRegressor
 from sklearn.preprocessing import KBinsDiscretizer
 from sklearn.linear_model import LogisticRegression
 from tqdm import tqdm
-from non_local_detector import Environment
 import numpy as np
+
+if TYPE_CHECKING:
+    from non_local_detector import Environment
 
 
 class DiscretizedRegression:
