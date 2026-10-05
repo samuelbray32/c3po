@@ -3,14 +3,14 @@ from spyglass.common import FirFilterParameters
 import pandas as pd
 from scipy.signal import hilbert
 
-def filter_data(t_data, data, filter_coeff, time_windows, context_dim, n_jobs):
+def filter_data(t_data, data, filter_coeff, time_windows, context_dim,):
     f, t_f = FirFilterParameters().filter_data(
         t_data,
         data,
         filter_coeff,
         time_windows,
         np.arange(context_dim),
-        n_jobs,
+        decimation = 1,
     )
     ind = ~np.isnan(f).any(axis=1)
     f = f[ind]
