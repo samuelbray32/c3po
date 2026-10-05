@@ -3,7 +3,7 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-dependencies = ["numpy", "jax", "jaxlib", "flax", "matplotlib"]
+dependencies = ["numpy", "jax", "jaxlib", "flax", "matplotlib", "h5py"]
 name = "c3po"
 description = "Unsupervised model to infer latent generative processes from point processes occuring in R^d spcae. Developed with focus for inferring neural states from waveform features of unclustered spike events."
 readme = "README.md"
