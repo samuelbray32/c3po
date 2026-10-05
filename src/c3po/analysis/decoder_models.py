@@ -62,6 +62,7 @@ class DiscretizedRegression:
             predict_method=self.predict_method,
             feature_smooth_std=self.feature_smooth_std,
             environment=self.environment,
+            indicator_discretizer=isinstance(self.discretizer, JointIndicatorDiscretizer),
             **self._model_kwargs,
         )
 
@@ -88,7 +89,7 @@ class DiscretizedRegression:
             sample_weights = np.empty(len(y_binned), dtype=float)
             for i, count in enumerate(class_counts):
                 if count > 0:
-                    sample_weights[y_binned == i] = class_weights[i]
+                    sample_weights[y_binned.flatten() == i] = class_weights[i]
             # self.model = LogisticRegression(
             #     max_iter=self.model.max_iter,
             #     class_weight=class_weights,
@@ -601,7 +602,10 @@ class PosteriorKNN:
         y_binned_probs = self.model.predict(X)
         if self.multidim:
             ordinal_pred = np.argmax(y_binned_probs, axis=1)
-            return self.discretizer.inverse_transform(ordinal_pred[:, None])
+            y_pred = self.discretizer.inverse_transform(ordinal_pred[:, None])
+            if return_posterior:
+                return y_pred, (y_binned_probs, self._observed_bin_centers())
+            return y_pred
 
         bin_centers = self._observed_bin_centers()
         if self.predict_method == "weighted":
