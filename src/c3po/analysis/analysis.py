@@ -1002,6 +1002,10 @@ class C3poAnalysis:
         Returns:
             _type_: _description_
         """
+        if smooth_context and filtered_context:
+            raise ValueError(
+                "Cannot use both smooth_context and filtered_context at the same time."
+            )
         t, c = self._select_data(
             pca, interpolated=True, filtered_context=filtered_context
         )
@@ -1167,20 +1171,25 @@ class C3poAnalysis:
         else:
             t_data, c_data = self._select_data(pca, interpolated=interpolate)
         c_data = c_data[:, decode_dim]
+        if self.normalize_decode_context:
+            c_data = c_data / np.linalg.norm(c_data, axis=1, keepdims=True)
 
         if intervals is not None:
             ind_valid = interval_list_contains_ind(intervals, t_data)
             c_data = c_data[ind_valid]
             t_data = t_data[ind_valid]
 
+        feature_times = feature_times.copy() - self.feature_prediction_delay
+
         ind = np.where(~np.isnan(c_data).any(axis=1))[0]
         c_data = c_data[ind]
         t_data = t_data[ind]
 
         ind_feature = np.digitize(t_data, feature_times) - 1
-        ind_feature = ind_feature[
-            np.logical_and(ind_feature >= 0, ind_feature < feature_values.shape[0])
-        ]
+        ind_contained = np.logical_and(ind_feature >= 0, ind_feature < feature_values.shape[0])
+        ind_feature = ind_feature[ind_contained]
+        c_data = c_data[ind_contained]
+        t_data = t_data[ind_contained]
         feature_values = feature_values[ind_feature]
 
         ind = np.where(~np.isnan(feature_values).any(axis=1))[0]
