@@ -1,5 +1,8 @@
 import numpy as np
-from spyglass.common import FirFilterParameters
+try:
+    from spyglass.common import FirFilterParameters
+except ImportError:
+    print("Spyglass not found. Please install spyglass to use the band filter functionality.")
 import pandas as pd
 from scipy.signal import hilbert
 
@@ -9,7 +12,7 @@ def filter_data(t_data, data, filter_coeff, time_windows, context_dim,):
         data,
         filter_coeff,
         time_windows,
-        np.arange(context_dim),
+        np.arange(data.shape[1]),
         decimation = 1,
     )
     ind = ~np.isnan(f).any(axis=1)
