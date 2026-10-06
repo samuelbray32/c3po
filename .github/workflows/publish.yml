@@ -1,0 +1,125 @@
+name: Build, test, and publish
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.10"
+
+      - name: Install build tools
+        run: python -m pip install --upgrade pip build twine
+
+      - name: Build wheel and source distribution
+        run: python -m build
+
+      - name: Validate distribution metadata
+        run: python -m twine check --strict dist/*
+
+      - name: Upload distributions
+        uses: actions/upload-artifact@v7
+        with:
+          name: distributions
+          path: dist/*
+          if-no-files-found: error
+
+  test:
+    needs: build
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+        distribution: [wheel, sdist]
+    env:
+      JAX_PLATFORMS: cpu
+      MPLBACKEND: Agg
+
+    steps:
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist
+
+      - name: Upgrade pip
+        run: python -m pip install --upgrade pip
+
+      - name: Install wheel
+        if: matrix.distribution == 'wheel'
+        run: python -m pip install dist/*.whl
+
+      - name: Install source distribution
+        if: matrix.distribution == 'sdist'
+        run: python -m pip install dist/*.tar.gz
+
+      - name: Check dependencies
+        run: python -m pip check
+
+      - name: Check public imports
+        run: |
+          python - <<'PY'
+          from c3po.model.model import C3PO, train_model
+          from c3po.model.bidirectional_model import BidirectionalC3PO
+          from c3po.analysis.analysis import C3poAnalysis
+          from c3po.analysis.utils_io import save_params_hdf5, load_params_hdf5
+          print("Public imports passed.")
+          PY
+
+      - name: Verify package version matches release tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          python - <<'PY'
+          import os
+          from importlib.metadata import version
+
+          expected = os.environ["GITHUB_REF_NAME"].removeprefix("v")
+          actual = version("c3po-neuro")
+          if actual != expected:
+              raise SystemExit(
+                  f"Package version {actual!r} does not match tag {expected!r}."
+              )
+          print(f"Verified release version: {actual}")
+          PY
+
+  publish:
+    needs: [build, test]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/project/c3po-neuro/
+    permissions:
+      id-token: write
+
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: distributions
+          path: dist
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
