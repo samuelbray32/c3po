@@ -1,9 +1,5 @@
 import os
 
-# Personal: by default change the CUDA_VISIBLE_DEVICES to something less used on server
-if os.environ.get("CUDA_VISIBLE_DEVICES", None) is None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "4"  # TODO: remove before release
-
 import jax
 import jax.numpy as jnp
 import flax.linen as nn

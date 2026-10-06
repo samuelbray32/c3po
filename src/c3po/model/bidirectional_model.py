@@ -1,26 +1,9 @@
 import os
 
-# Personal: by default change the CUDA_VISIBLE_DEVICES to something less used on server
-if os.environ.get("CUDA_VISIBLE_DEVICES", None) is None:
-    os.environ["CUDA_VISIBLE_DEVICES"] = "4"  # TODO: remove before release
-
 import jax
 import jax.numpy as jnp
 
-# import flax.linen as nn
-# from jax import pmap
-# from flax.linen import Module
-# from functools import partial
-# import numpy as np
-# import optax
-from typing import Sequence, Callable, Dict
-from tqdm import tqdm
-
-from .encoder import encoder_factory
-from .context import context_factory
-from .rate_prediction import rate_prediction_factory
-from .process_models import distribution_dictionary
-from .util import DilatedCausalConv1D, chunked_logsumexp
+from .util import chunked_logsumexp
 
 from .model import C3PO, get_neg_samples_batch
 

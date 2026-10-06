@@ -26,7 +26,9 @@ from c3po.analysis.intervals import (
     interval_list_complement,
 )
 
-figure_directory = "/home/sambray/Documents/c3po/Figures/"
+import os
+from pathlib import Path
+figure_directory = Path(os.environ.get("C3PO_FIGURE_DIRECTORY", Path.cwd()))
 
 
 class C3poAnalysis:

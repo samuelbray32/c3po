@@ -3,13 +3,23 @@ requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
 [project]
-dependencies = ["numpy", "jax", "jaxlib", "flax", "matplotlib", "h5py"]
-name = "c3po"
+dependencies = [
+    "numpy",
+    "jax",
+    "jaxlib",
+    "flax",
+    "matplotlib",
+    "h5py",
+    "scipy",
+    "scikit-learn",
+    "tqdm",
+]
+name = "c3po-neuro"
 description = "Unsupervised model to infer latent generative processes from point processes occuring in R^d spcae. Developed with focus for inferring neural states from waveform features of unclustered spike events."
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 license = { file = "LICENSE" }
-authors = [{ name = "Sam Bray", email = "sam.bray@ucsf.edu" }]
+authors = [{ name = "Samuel Bray", email = "sam.bray@ucsf.edu" }]
 classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: MIT License",
