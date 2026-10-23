@@ -1,0 +1,47 @@
+{
+  "context_args": {
+    "categorical": false,
+    "context_model": "wavenet",
+    "expanded_dim": 64,
+    "layer_dilations": [
+      1,
+      2,
+      4,
+      8,
+      16,
+      1,
+      2,
+      4,
+      8,
+      16
+    ],
+    "layer_kernel_size": [
+      8,
+      8,
+      16,
+      16,
+      32,
+      8,
+      8,
+      16,
+      16,
+      32
+    ],
+    "smoothing": 10,
+    "smoothing_decay": 0.9
+  },
+  "context_dim": 16,
+  "distribution": "poisson",
+  "encoder_args": {
+    "encoder_model": "sorted_spikes",
+    "input_format": "indices",
+    "n_units": -1
+  },
+  "latent_dim": 16,
+  "n_neg_samples": [
+    4
+  ],
+  "rate_args": {
+    "rate_model": "sharedSpace"
+  }
+}

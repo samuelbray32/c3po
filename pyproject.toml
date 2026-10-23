@@ -8,11 +8,17 @@ dependencies = [
     "jax",
     "jaxlib",
     "flax",
+    "optax",
     "matplotlib",
+    "pandas",
     "h5py",
     "scipy",
     "scikit-learn",
     "tqdm",
+    "dandi",
+    "fsspec[http]",
+    "pynwb",
+    "pyyaml"
 ]
 name = "c3po-neuro"
 description = "Unsupervised model to infer latent generative processes from point processes occuring in R^d spcae. Developed with focus for inferring neural states from waveform features of unclustered spike events."
