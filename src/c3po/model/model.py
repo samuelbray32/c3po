@@ -470,6 +470,7 @@ def _make_loss_fn(
     model: Module,
     loss_type: str = "contrastive",
     l1_penalty: float = None,
+    return_embedding_range: bool = False,
 ) -> Callable:
     """Return a jittable loss that does not close over changing Python objects."""
     apply_fn = _make_apply_fn(model)
@@ -483,7 +484,7 @@ def _make_loss_fn(
 
         if loss_type == "contrastive":
             # Keep this pure and array-driven; no Python branching on data.
-            return (
+            loss = (
                 model.contrastive_loss(
                     pos_params,
                     neg_params,
@@ -494,11 +495,15 @@ def _make_loss_fn(
                 + l1_loss
             )
         elif loss_type == "mle":
-            return (
+            loss = (
                 model.mle_loss(pos_params, neg_params, delta_t, rand_key=rng) + l1_loss
             )
         else:
             raise ValueError("Unknown loss_type")
+        if return_embedding_range:
+            context_range = jnp.max(jnp.max(_c,axis = [0,1]) - jnp.min(_c, axis = [0,1]))
+            return loss, context_range
+        return loss
 
     return loss_fn
 
@@ -568,9 +573,12 @@ def train_model(
     buffer = buffer_size
 
     # create jittable loss and grad functions
-    loss_fn = _make_loss_fn(model, loss_type=loss_type, l1_penalty=l1_penalty)
+    return_embedding_range = (not multi_gpu)
+    loss_fn = _make_loss_fn(
+        model, loss_type=loss_type, l1_penalty=l1_penalty, return_embedding_range=return_embedding_range
+    )
     if not multi_gpu:
-        loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+        loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
     else:
         # loss_grad_fn = pmap(loss_grad_fn, in_axes=(None, 0, 0, 0))
         train_step_fn = make_multi_gpu_train_step(loss_fn, optimizer)
@@ -634,12 +642,12 @@ def train_model(
                 model = update_n_neg(model, n_neg)
                 # update the training functions
                 loss_fn = _make_loss_fn(
-                    model, loss_type=loss_type, l1_penalty=l1_penalty
+                    model, loss_type=loss_type, l1_penalty=l1_penalty, return_embedding_range=return_embedding_range
                 )
                 if not multi_gpu:
                     del loss_grad_fn  # free memory
                     jax.clear_caches()
-                    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
                 else:
                     del train_step_fn  # free memory
                     jax.clear_caches()
@@ -656,12 +664,15 @@ def train_model(
                 model = update_n_neg(model, n_neg)
                 # update the training functions
                 loss_fn = _make_loss_fn(
-                    model, loss_type=loss_type, l1_penalty=l1_penalty
+                    model,
+                    loss_type=loss_type,
+                    l1_penalty=l1_penalty,
+                    return_embedding_range=return_embedding_range
                 )
                 if not multi_gpu:
                     del loss_grad_fn  # free memory
                     jax.clear_caches()
-                    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn))
+                    loss_grad_fn = jax.jit(jax.value_and_grad(loss_fn, has_aux=True))
                 else:
                     del train_step_fn  # free memory
                     jax.clear_caches()
@@ -738,12 +749,15 @@ def train_epoch(
             batch_inds = ind[j : j + batch_size]
             if len(batch_inds) < batch_size:
                 break
-            loss_val, grads = loss_grad_fn(
+            (loss_val, context_max_range), grads = loss_grad_fn(
                 params, x_train[batch_inds], delta_t_train[batch_inds], rand_key
             )
             if not np.isfinite(loss_val):
                 params = prev_params.copy()
                 raise ValueError("Loss is not finite")
+            if context_max_range < 1e-5:
+                params = prev_params.copy()
+                raise ValueError("Context embedding collapsed")
             epoch_loss.append(loss_val)
             updates, opt_state = optimizer.update(grads, opt_state, params)
             params = optax.apply_updates(params, updates)
@@ -754,7 +768,7 @@ def train_epoch(
             rand_prob = 1 / (1 + n_neg)
             rand_prob = f"{rand_prob:.4f}"
             pos_prob = f"{pos_prob:.4f}"
-
+            context_max_range = f"{context_max_range:.3f}"
             pbar.update(batch_size)
             pbar.set_postfix(
                 loss=loss_val,
@@ -762,6 +776,7 @@ def train_epoch(
                 batch_size=batch_size,
                 pos_prob=pos_prob,
                 rand_prob=rand_prob,
+                c_range=context_max_range
             )
 
     average_epoch_loss = np.mean(epoch_loss)
