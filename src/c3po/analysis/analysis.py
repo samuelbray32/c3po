@@ -146,6 +146,7 @@ class C3poAnalysis:
             model = C3PO(**model_args)
         return model, model_args, params
 
+
     def initialize_from_table_entry(self, init_key):
         from ..tables.dev_tables import C3POStorage
 
@@ -181,6 +182,157 @@ class C3poAnalysis:
         null_params = model.init(jax.random.PRNGKey(1), x_, delta_t_, rand_key)
         params = serialization.from_bytes(null_params, entry["learned_params"])
         return model, model_args, params
+
+
+    @classmethod
+    def from_cloud_model(
+        cls,
+        repo_name: str = "samuelbray32/c3po-publication",
+        model_name: str = "Fig2_s1",
+        cache_dir: str | Path | None = None,
+        revision: str = "main",
+        token: str | bool | None = None,
+    ) -> "C3poAnalysis":
+        """Load a pretrained C3PO model from Hugging Face.
+
+        The model is downloaded from a Hugging Face Dataset repository
+        and initialized using the existing local model loader.
+
+        Parameters
+        ----------
+        repo_name : str, default="samuelbray32/c3po-publication"
+            Hugging Face dataset repository identifier.
+        model_name : str, default="Fig2_s1"
+            Directory containing the pretrained model.
+        cache_dir : str or Path, optional
+            Local Hugging Face cache directory. Defaults to the
+            C3PO_MODEL_CACHE environment variable, or the standard
+            Hugging Face cache.
+        revision : str, default="main"
+            Repository branch, tag, or commit hash.
+        token : str or bool, optional
+            Authentication token for private or gated repositories.
+
+        Returns
+        -------
+        C3poAnalysis
+            Initialized analysis containing the pretrained model,
+            trained parameters, and embedded neural data.
+
+        Raises
+        ------
+        ImportError
+            If huggingface_hub is not installed.
+        FileNotFoundError
+            If required model files are missing from the repository.
+        ValueError
+            If the model directory name is invalid or the downloaded
+            files cannot be loaded as a C3PO model.
+        """
+        try:
+            from huggingface_hub import HfApi, snapshot_download
+        except ImportError as exc:
+            raise ImportError(
+                "Loading cloud models requires huggingface_hub. "
+                "Install it with: pip install 'c3po-neuro[cloud]'"
+            ) from exc
+
+        model_path = Path(model_name)
+
+        if (
+            not model_name
+            or model_path.is_absolute()
+            or ".." in model_path.parts
+            or "\\" in model_name
+        ):
+            raise ValueError(f"Invalid model name: {model_name!r}")
+
+        required_files = (
+            "params.hdf5",
+            "args.json",
+            "embedding.npz",
+        )
+
+        remote_files = [
+            (model_path / filename).as_posix()
+            for filename in required_files
+        ]
+
+        # Check that the repository contains a complete C3PO model.
+        api = HfApi()
+        available_files = set(
+            api.list_repo_files(
+                repo_id=repo_name,
+                repo_type="dataset",
+                revision=revision,
+                token=token,
+            )
+        )
+
+        missing_files = set(remote_files) - available_files
+
+        if missing_files:
+            raise FileNotFoundError(
+                f"Model {model_name!r} in {repo_name!r} is missing "
+                f"required files: {sorted(missing_files)}"
+            )
+
+        # Resolve the cache directory without modifying global
+        # Hugging Face environment settings.
+        if cache_dir is None:
+            cache_dir = os.environ.get("C3PO_MODEL_CACHE")
+
+        if cache_dir is not None:
+            cache_dir = str(Path(cache_dir).expanduser())
+
+        # Download only the files belonging to this model.
+        local_repo = Path(
+            snapshot_download(
+                repo_id=repo_name,
+                repo_type="dataset",
+                revision=revision,
+                token=token,
+                allow_patterns=remote_files,
+                cache_dir=cache_dir,
+            )
+        )
+
+        local_model_dir = local_repo / model_path
+
+        # Validate downloaded files before initialization.
+        for filename in required_files:
+            if not (local_model_dir / filename).is_file():
+                raise FileNotFoundError(
+                    f"Downloaded model is missing {filename!r}."
+                )
+
+        # Delegate model reconstruction and embedding loading
+        # to the existing C3PO constructor.
+        try:
+            analysis = cls(model_dir=local_model_dir)
+        except Exception as exc:
+            raise ValueError(
+                f"Failed to initialize C3PO model {model_name!r} "
+                f"from {repo_name!r}: {exc}"
+            ) from exc
+
+        # Validate embedded array dimensions.
+        if (
+            analysis.z.ndim != 2
+            or analysis.c.ndim != 2
+            or analysis.t.ndim != 1
+            or analysis.z.shape[1] != analysis.latent_dim
+            or analysis.c.shape[1] != analysis.context_dim
+            or analysis.z.shape[0] != analysis.c.shape[0]
+            or analysis.z.shape[0] != analysis.t.shape[0]
+        ):
+            raise ValueError(
+                f"Model {model_name!r} contains incompatible "
+                "embedding dimensions."
+            )
+
+        return analysis
+
 
     @property
     def encoder_args(self):
