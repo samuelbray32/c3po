@@ -10,8 +10,23 @@ import h5py
 import pandas as pd
 import numpy as np
 import jax
+import time
+import yaml
+
 from c3po.model.model import C3PO, train_model
 from c3po.model.util import prep_training_data
+from c3po.utils.model_configs import configs
+
+DEFAULT_TRAIN_ARGS = dict(
+    learning_rate=3e-4,  # if outputs end up as all zeros, try a smaller learning rate
+    n_epochs=1000,  # maximum number of epochs (usually will hit stop criteria long before this)
+    initial_batch_size=64,
+    buffer_size=8,
+    min_batch_size=32,
+    max_n_neg=128,
+    initial_n_neg=8,
+    multi_gpu=False,  # If True and multiple GPUs are available, multiple batches can be processed in parallel
+)
 
 
 # Helpers
@@ -66,39 +81,30 @@ def get_spike_data(nwbfile):
     return mark_times, mark_ids
 
 
-def get_default_c3po_model(n_units, dimensions, mua_rate):
-    # Dimensionality, recommend to be same for both latent and context spaces
-    latent_dim = dimensions
-    context_dim = dimensions
+def get_sorted_c3po_model(
+    n_units: int,
+    dimensions: int,
+    mua_rate: float,
+    model_args: dict | Path | str = "sorted_default_v0",
+):
+    # Load the model_args from file if provided
+    if isinstance(model_args, str) and model_args in configs:
+        model_args = configs[model_args]
 
-    # Encoder model (waveform (neuron_id) to Z)
-    encoder_args = dict(
-        encoder_model="sorted_spikes",
-        n_units=n_units,
-        input_format="indices",
-    )
+    elif isinstance(model_args, (Path, str)):
+        from c3po.analysis.utils_io import read_config
 
-    # Context model (Z to C)
-    dilations = [
-        1,
-        2,
-        4,
-        8,
-        16,
-    ]
-    kernels = [8, 8, 16, 16, 32]
-    dilations = dilations * 2
-    kernels = kernels * 2
-    smoothing = 10
-    context_args = dict(
-        context_model="wavenet",
-        layer_dilations=dilations,
-        layer_kernel_size=kernels,
-        expanded_dim=64,
-        smoothing=smoothing,
-        smoothing_decay=0.9,
-        categorical=False,
-    )
+        if not Path(model_args).exists():
+            raise FileNotFoundError(f"Model args file {model_args} not found.")
+        model_args = read_config(model_args)
+
+    # assign model-specific parameters
+    model_args["encoder_args"]["n_units"] = n_units
+    model_args["latent_dim"] = dimensions
+    model_args["context_dim"] = dimensions
+
+    # report smoothing timescale if applicable
+    smoothing = model_args["context_args"].get("smoothing", 0)
     if smoothing > 1:
         print(
             f"Smoothing is enabled with a value of {smoothing}, corresponding to a"
@@ -107,50 +113,94 @@ def get_default_c3po_model(n_units, dimensions, mua_rate):
     else:
         print("Smoothing is disabled.")
 
+    kernels = model_args["context_args"].get("layer_kernel_size", [])
+    dilations = model_args["context_args"].get("layer_dilations", [])
     context_window = max([d * k for d, k in zip(dilations, kernels)])
     context_time = context_window / mua_rate
     print(
         f"Context window is {context_window} samples, corresponding to a timescale of {context_time*1000:.2f}ms."
     )
-
-    # Rate model (C to hazard function parameters)
-    # Recommend to NOT change for best interpretability
-    rate_args = dict(
-        rate_model="sharedSpace",
+    model_args.update(
+        {
+            "predicted_sequence_length": 1,
+            "return_embeddings_in_call": True,
+        }
     )
 
-    # Process model of the conditional Hazard function
-    # Other options implemented but never found a case where necessary in dense
-    # recordings with high mua firing rates
-    process_model = "poisson"
-
-    model_args = dict(
-        encoder_args=encoder_args,
-        context_args=context_args,
-        rate_args=rate_args,
-        distribution=process_model,
-        latent_dim=latent_dim,
-        context_dim=context_dim,
-    )
-    model = C3PO(
-        **model_args,
-        n_neg_samples=8,
-        predicted_sequence_length=1,
-        return_embeddings_in_call=True,
-    )
+    model = C3PO(**model_args)
     return model, model_args
 
 
-def train_from_dandi(dandiset_id, dandi_path, dandi_instance, dimensions, output_dir):
-    import time
-
+def train_from_dandi(
+    dandiset_id: str,
+    dandi_path: str,
+    dandi_instance: str,
+    dimensions: int,
+    output_dir: Path,
+    sample_length=2000,
+    train_args: dict = dict(),
+    model_args: dict | Path | str = "sorted_default_v0",
+):
     io, nwbfile = get_dandi_file(dandiset_id, dandi_path, dandi_instance)
-    mark_times, mark_ids = get_spike_data(nwbfile)
+    return train_from_nwb(
+        nwbfile,
+        dimensions,
+        output_dir,
+        sample_length=sample_length,
+        model_args=model_args,
+        train_args=train_args,
+    )
 
-    scale_unit = "ms"
+
+def train_from_nwb(
+    nwbfile: pynwb.NWBFile | str | Path,
+    dimensions: int,
+    output_dir: Path,
+    sample_length=2000,
+    model_args: dict | Path | str = "sorted_default_v0",
+    multi_gpu: bool = False,
+    train_args: dict = dict()
+):
+    # If nwbfile is a path, read the NWB file
+    if isinstance(nwbfile, [str, Path]):
+        import pynwb
+
+        io = pynwb.NWBHDF5IO(nwbfile, "r")
+        nwbfile = io.read()
+    mark_times, mark_ids = get_spike_data(nwbfile)
+    return train_from_spike_data(
+        mark_times,
+        mark_ids,
+        dimensions,
+        output_dir,
+        sample_length=sample_length,
+        model_args=model_args,
+        train_args=train_args
+    )
+
+
+def train_from_spike_data(
+    mark_times,
+    mark_ids,
+    dimensions,
+    output_dir,
+    sample_length=2000,
+    model_args: dict | Path | str = "sorted_default_v0",
+    train_args: dict = dict(),
+    time_scale_unit: str = "ms"
+):
+    # Merge default train_args with user-provided train_args
+    compiled_train_args = DEFAULT_TRAIN_ARGS.copy()
+    compiled_train_args.update(train_args)
+
+    # prep data
     delta_t = np.diff(mark_times)[None, ...]  # delay between each spike event
-    if scale_unit == "ms":
+    if time_scale_unit == "ms":
         delta_t *= 1000
+    elif time_scale_unit == "us":
+        delta_t *= 1e6
+    elif time_scale_unit != "s":
+        raise ValueError("time_scale_unit must be 'ms', 'us', or 's'")
     x = mark_ids[1:][None, ...].astype(
         np.int16
     )  # unit id of each spike event, excluding the first event since it has no delta_t
@@ -159,7 +209,7 @@ def train_from_dandi(dandiset_id, dandi_path, dandi_instance, dimensions, output
     x = x[:, ind_valid]
     delta_t = delta_t[:, ind_valid]
 
-    sample_length = 2000  # number of spike events in each sample
+    sample_length = sample_length  # number of spike events in each sample
     x_train, delta_t_train = prep_training_data(x, delta_t, sample_length)
     x_train = x_train[..., None]
 
@@ -168,8 +218,8 @@ def train_from_dandi(dandiset_id, dandi_path, dandi_instance, dimensions, output
     print(f"Average sample duration: {(sample_length/mua_rate):.2f} seconds")
 
     n_units = np.max(x) + 1
-    model, model_args = get_default_c3po_model(
-        n_units=n_units, dimensions=dimensions, mua_rate=mua_rate
+    model, model_args = get_sorted_c3po_model(
+        n_units=n_units, dimensions=dimensions, mua_rate=mua_rate, model_args=model_args
     )
     print(f"Model initialized with {n_units} units and {dimensions} dimensions.")
     rand_key = jax.random.PRNGKey(0)
@@ -182,14 +232,15 @@ def train_from_dandi(dandiset_id, dandi_path, dandi_instance, dimensions, output
         params,
         x_train,
         delta_t_train,
-        learning_rate=3e-4,  # if outputs end up as all zeros, try a smaller learning rate
-        n_epochs=1000,  # maximum number of epochs (usually will hit stop criteria long before this)
-        initial_batch_size=64,
-        buffer_size=8,
-        min_batch_size=32,
-        max_n_neg=128,
-        initial_n_neg=8,
-        multi_gpu=False,  # If True and multiple GPUs are available, multiple batches can be processed in parallel
+        **compiled_train_args
+        # learning_rate=3e-4,  # if outputs end up as all zeros, try a smaller learning rate
+        # n_epochs=1000,  # maximum number of epochs (usually will hit stop criteria long before this)
+        # initial_batch_size=64,
+        # buffer_size=8,
+        # min_batch_size=32,
+        # max_n_neg=128,
+        # initial_n_neg=8,
+        # multi_gpu=multi_gpu,  # If True and multiple GPUs are available, multiple batches can be processed in parallel
     )
     training_end = time.time()
     print(f"Training completed in {training_end-training_start:.2f} seconds.")
@@ -207,7 +258,7 @@ def train_from_dandi(dandiset_id, dandi_path, dandi_instance, dimensions, output
         delta_t,
         first_mark_time=mark_times[0],
         chunk_size=5000,
-        delta_t_units=scale_unit,
+        delta_t_units=time_scale_unit,
     )
     analysis.fit_context_pca()
     t_interp = np.arange(analysis.t[0], analysis.t[-1], 0.001)
@@ -234,9 +285,8 @@ def train_from_dandi(dandiset_id, dandi_path, dandi_instance, dimensions, output
         "n_units": int(n_units),
         "dimensions": int(dimensions),
         "mua_rate": float(mua_rate),
+        "time_scale_unit": time_scale_unit,
     }
     # Save metrics as a yaml file
-    import yaml
-
     with open(output_dir / "metrics.yaml", "w") as f:
         yaml.dump(metrics, f)
