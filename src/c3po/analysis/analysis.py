@@ -254,7 +254,7 @@ class C3poAnalysis:
         )
 
         remote_files = [
-            f"{model_path.as_posix()}/{filename}"
+            (model_path / filename).as_posix()
             for filename in required_files
         ]
 
