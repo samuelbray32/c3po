@@ -666,6 +666,8 @@ class Wavenet(nn.Module):
     )
     final_smooth: int = 0  # causal smoothing filter on final output
 
+    leaky_relu: bool = False  # if true, use leaky relu instead of relu
+
     def setup(self):
         self.tanh_layers = [
             DilatedCausalConv1D(
@@ -724,9 +726,15 @@ class Wavenet(nn.Module):
             x = jnp.cumsum(skip_connection, axis=-2)  # cumsum over time
 
         else:
-            skip_connection = nn.relu(skip_connection)
+            if self.leaky_relu:
+                skip_connection = jax.nn.leaky_relu(skip_connection, negative_slope=0.01)
+            else:
+                skip_connection = nn.relu(skip_connection)
             x = self.post_sum(skip_connection)
-            x = jax.nn.relu(x)
+            if self.leaky_relu:
+                x = jax.nn.leaky_relu(x, negative_slope=0.01)
+            else:
+                x = jax.nn.relu(x)
             x = self.final_proj(x)
         if self.categorical:
             x = jax.nn.softmax(x, axis=-1)
