@@ -32,6 +32,14 @@ figure_directory = Path(os.environ.get("C3PO_FIGURE_DIRECTORY", Path.cwd()))
 
 
 class C3poAnalysis:
+    """Analysis of a trained C3PO model: embed data, project, decode, and
+    compute statistics of the resulting context.
+
+    Initialize from exactly one of: (`model`, `model_args`, `params`),
+    `init_key` (a database table entry), or `model_dir` (a saved model
+    directory).
+    """
+
     def __init__(
         self,
         model=None,
@@ -491,7 +499,9 @@ class C3poAnalysis:
         else:
             raise ValueError(f"Detrending method {method} not supported.")
 
-    def linear_detrend(self, intervals=None):
+    def linear_detrend(self, intervals=None) -> None:
+        """Subtract a per-dimension linear fit (fit within `intervals`, default
+        all times) from the context `self.c`, in place."""
         if intervals is None:
             intervals = np.array([[self.t[0], self.t[-1]]])
         ind = interval_list_contains_ind(intervals, self.t)
@@ -503,7 +513,9 @@ class C3poAnalysis:
         self.c = self.c - fit_detrend
         return
 
-    def proj_detrend(self, fit_intervals=None):
+    def proj_detrend(self, fit_intervals=None) -> None:
+        """Remove from `self.c` its component along the axis of linear drift
+        (fit within `fit_intervals`, default all times), in place."""
         if fit_intervals is None:
             fit_intervals = np.array([[self.t[0], self.t[-1]]])
         t, data = self._select_data(pca=False, interpolated=False)
@@ -521,8 +533,22 @@ class C3poAnalysis:
         self.c = self.c - np.outer(projection, axis)
 
     def fit_context_pca(
-        self, fit_intervals=None, interpolated=False, n_components=None
-    ):
+        self,
+        fit_intervals: Optional[np.ndarray] = None,
+        interpolated: bool = False,
+        n_components: Optional[int] = None,
+    ) -> None:
+        """Fit PCA to the context and store the projection.
+
+        Parameters
+        ----------
+        fit_intervals : np.ndarray, optional
+            Intervals (n_intervals, 2) used to fit. Default all times.
+        interpolated : bool
+            If True, fit to the interpolated context.
+        n_components : int, optional
+            Number of components. Default is the context dimension.
+        """
         self._check_embedded_data()
         if fit_intervals is None:
             fit_intervals = np.array([[self.t[0], self.t[-1]]])
@@ -1780,12 +1806,34 @@ class C3poAnalysis:
 
 
 def bootstrap_traces(
-    data,
-    sample_size=None,
+    data: np.ndarray,
+    sample_size: Optional[int] = None,
     statistic=np.mean,
-    n_boot=1e3,
-    conf_interval=95,
-):
+    n_boot: Union[int, float] = 1e3,
+    conf_interval: float = 95,
+) -> Tuple[np.ndarray, List[np.ndarray]]:
+    """Bootstrap a statistic across the rows (traces) of `data`.
+
+    Parameters
+    ----------
+    data : np.ndarray
+        Shape (n_traces, n_samples).
+    sample_size : int, optional
+        Traces drawn (with replacement) per bootstrap. Default n_traces.
+    statistic : callable
+        Called as `statistic(sample, axis=0)`.
+    n_boot : int or float
+        Number of bootstrap iterations.
+    conf_interval : float
+        Confidence interval width in percent (0-100).
+
+    Returns
+    -------
+    mean : np.ndarray
+        Mean of the bootstrapped statistic, shape (n_samples,).
+    interval : list of np.ndarray
+        [lower, upper] confidence bounds, each shape (n_samples,).
+    """
     if sample_size is None:
         sample_size = data.shape[0]
     bootstrap = []
@@ -1804,17 +1852,19 @@ def bootstrap_traces(
 
 
 def bootstrap_confidence_interval(
-    data, num_bootstrap_samples=1000, confidence_level=0.95
-):
+    data: np.ndarray,
+    num_bootstrap_samples: int = 1000,
+    confidence_level: float = 0.95,
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Compute the bootstrap confidence interval for the mean of the data.
 
     Parameters:
-        data (array-like): The input data.
+        data (np.ndarray): The input data, bootstrapped over axis 0.
         num_bootstrap_samples (int): Number of bootstrap samples to generate.
         confidence_level (float): The desired confidence level (between 0 and 1).
     Returns:
-        tuple: Lower and upper bounds of the confidence interval.
+        tuple of np.ndarray: Lower and upper bounds of the confidence interval.
     """
     means = []
     n = len(data)
@@ -1835,20 +1885,19 @@ def bootstrap_confidence_interval(
 
 
 def weighted_quantile(
-    values,
-    quantiles,
-    sample_weight=None,
-):
+    values: np.ndarray,
+    quantiles: Union[float, List[float], np.ndarray],
+    sample_weight: Optional[np.ndarray] = None,
+) -> np.ndarray:
     """Very close to numpy.percentile, but supports weights.
     NOTE: quantiles should be in [0, 1]!
-    :param values: numpy.array with data
-    :param quantiles: array-like with many quantiles needed
-    :param sample_weight: array-like of the same length as `array`
-    :param values_sorted: bool, if True, then will avoid sorting of
-        initial array
-    :param old_style: if True, will correct output to be consistent
-        with numpy.percentile.
-    :return: numpy.array with computed quantiles.
+    :param values: numpy.ndarray with data, 1D (n_samples,) or 2D
+        (n_samples, n_dims); for 2D, quantiles are computed per column
+    :param quantiles: array-like with the quantiles needed
+    :param sample_weight: array-like of length n_samples, optional
+        (default equal weights)
+    :return: numpy.ndarray of quantiles, shape (n_quantiles,) for 1D input
+        or (n_quantiles, n_dims) for 2D input.
     """
     if values.ndim == 1:
         return _weighted_quantile_single(
@@ -1870,20 +1919,16 @@ def weighted_quantile(
 
 
 def _weighted_quantile_single(
-    values,
-    quantiles,
-    sample_weight=None,
-):
-    """Very close to numpy.percentile, but supports weights.
+    values: np.ndarray,
+    quantiles: Union[float, List[float], np.ndarray],
+    sample_weight: Optional[np.ndarray] = None,
+) -> np.ndarray:
+    """Weighted quantiles of a 1D array; see `weighted_quantile`.
     NOTE: quantiles should be in [0, 1]!
-    :param values: numpy.array with data
-    :param quantiles: array-like with many quantiles needed
-    :param sample_weight: array-like of the same length as `array`
-    :param values_sorted: bool, if True, then will avoid sorting of
-        initial array
-    :param old_style: if True, will correct output to be consistent
-        with numpy.percentile.
-    :return: numpy.array with computed quantiles.
+    :param values: numpy.ndarray with data, shape (n_samples,)
+    :param quantiles: array-like with the quantiles needed
+    :param sample_weight: array-like of length n_samples, optional
+    :return: numpy.ndarray of quantiles, shape (n_quantiles,).
     """
     values = np.array(values)
     quantiles = np.array(quantiles)
@@ -1904,7 +1949,14 @@ def _weighted_quantile_single(
     return np.interp(quantiles, weighted_quantiles, values)
 
 
-def _single_cross_correlation(c, t, i, j, intervals, max_lag):
+def _single_cross_correlation(
+    c: np.ndarray,
+    t: np.ndarray,
+    i: int,
+    j: int,
+    intervals: np.ndarray,
+    max_lag: int,
+) -> Tuple[np.ndarray, int, int]:
     """Returns the cross-correlation between dimensions i and j of c over the specified intervals.
 
     Parameters
