@@ -14,7 +14,8 @@ class ProcessModel:
     sample_params = None
 
     def log_survival(self, t, params):
-        """
+        """Log survival function.
+
         Params of shape (batch_size, n_samples, n_marks, n_params)
         t is of shape (batch_size, n_samples, n_marks)
         """
@@ -25,15 +26,19 @@ class ProcessModel:
         raise NotImplementedError
 
     def hazard(self, t, params, sum=True):
+        """Hazard function, exp of `log_hazard`."""
         return jnp.exp(self.log_hazard(t, params, sum=sum))
 
     def survival(self, t, params, sum=True):
+        """Survival function, exp of `log_survival`."""
         return jnp.exp(self.log_survival(t, params, sum=sum))
 
 
 class PoissonProcess(ProcessModel):
-    """Input parameters:
-    log_rate: rate of the Poisson process
+    """Homogeneous Poisson process (constant hazard).
+
+    Input parameters:
+    log_rate: log of the rate of the Poisson process, shape (..., 1)
     """
 
     n_params = 1
@@ -46,6 +51,12 @@ class PoissonProcess(ProcessModel):
 
 
 class GompertzProcess(ProcessModel):
+    """Gompertz process with hazard eta * exp(beta * t).
+
+    Parameters (real-valued, passed through softplus and clipped): eta, beta.
+    Note: with `sum=False`, `log_survival` currently does not return a value.
+    """
+
     n_params = 2
 
     def parse_params(self, params):
@@ -86,6 +97,8 @@ class GompertzProcess(ProcessModel):
 
 
 class GammaProcess(ProcessModel):
+    """Gamma process (parameters eta, log beta). Incomplete: `log_hazard` raises
+    NotImplementedError as there is no closed-form hazard."""
 
     n_params = 2
 
@@ -107,6 +120,11 @@ class GammaProcess(ProcessModel):
 
 
 class WeibullProcess(ProcessModel):
+    """Weibull process with hazard k * (t * lam)**(k - 1) * lam.
+
+    Parameters (real-valued, passed through softplus and clipped): lam (rate), k (shape).
+    """
+
     n_params = 2
 
     def parse_params(self, params):
@@ -146,6 +164,8 @@ class WeibullProcess(ProcessModel):
 
 
 class MuliWeibullProcess(ProcessModel):
+    """Sum of `n_processes` (5) Weibull processes, each with its own 2 parameters."""
+
     n_processes = 5
     weibull = WeibullProcess()
     n_params = n_processes * WeibullProcess().n_params
@@ -192,6 +212,11 @@ class MuliWeibullProcess(ProcessModel):
 
 
 class LogLogisticProcess(ProcessModel):
+    """Log-logistic process with hazard beta*(t*alpha)**(beta-1)*alpha / (1 + (t*alpha)**beta).
+
+    Parameters (real-valued, passed through softplus and clipped): alpha (scale rate), beta (shape).
+    """
+
     n_params = 2
 
     def parse_params(self, params):
@@ -231,6 +256,8 @@ class LogLogisticProcess(ProcessModel):
 
 
 class MultiLogLogisticProcess(ProcessModel):
+    """Sum of `n_processes` (5) log-logistic processes, each with its own 2 parameters."""
+
     n_processes = 5
     log_logistic = LogLogisticProcess()
     n_params = n_processes * LogLogisticProcess().n_params
@@ -283,10 +310,13 @@ class MultiLogLogisticProcess(ProcessModel):
 
 
 class UniformDistribution(ProcessModel):
+    """Uniform distribution over [0, t_max); has no parameters."""
+
     n_params = 0
     t_max = 1000  # uniform pdf is 1/t_max
 
     def support_t(self, t):
+        """Clip `t` to the support [0, t_max)."""
         return jnp.clip(t, 0, self.t_max - 1e-5)
 
     def hazard(self, t, params):
@@ -339,8 +369,10 @@ class UniformDistribution(ProcessModel):
 class SilentWeightedProcess(ProcessModel):
     """Designed to allow the model to "gate" the firing rate of the underlying process.
 
-    Args:
-        base_model (ProcessModel): The underlying process model. (currently fixed but can be swapped easily)
+    The underlying process model is currently fixed to `LogLogisticProcess`. The
+    last parameter is a gate; `sigmoid(gate + 3)` is the probability the process is active.
+    Instances (not the class) are registered in `distribution_dictionary`; calling an
+    instance returns itself.
     """
 
     def __init__(self):
@@ -348,9 +380,11 @@ class SilentWeightedProcess(ProcessModel):
         self.n_params = self.base_model.n_params + 1
 
     def __call__(self, *args, **kwds):
+        """Return self, so the registered instance can be used like a class."""
         return self
 
     def parse_params(self, params):
+        """Split params into the gate probability and the base model parameters."""
         passed_params = params[..., :-1]
         sigma = jax.nn.sigmoid(params[..., -1] + 3)
         return sigma, passed_params

@@ -6,7 +6,35 @@ except ImportError:
 import pandas as pd
 from scipy.signal import hilbert
 
-def filter_data(t_data, data, filter_coeff, time_windows, context_dim,):
+def filter_data(
+    t_data: np.ndarray,
+    data: np.ndarray,
+    filter_coeff: np.ndarray,
+    time_windows: np.ndarray,
+    context_dim: int,
+) -> dict:
+    """Band-pass filter data and compute its analytic phase and power.
+
+    Parameters
+    ----------
+    t_data : np.ndarray
+        Timestamps of `data`, shape (n_samples,).
+    data : np.ndarray
+        Data to filter, shape (n_samples, n_dims).
+    filter_coeff : np.ndarray
+        FIR filter coefficients (as used by spyglass FirFilterParameters).
+    time_windows : np.ndarray
+        Intervals (n_intervals, 2) over which to filter.
+    context_dim : int
+        Number of context dimensions. Currently unused.
+
+    Returns
+    -------
+    dict
+        "signal" : filtered data, "time" : timestamps, "phase" : Hilbert phase
+        in [0, 2*pi], "power" : squared Hilbert amplitude. Samples with NaNs
+        are removed; arrays have shape (n_valid_samples, n_dims).
+    """
     f, t_f = FirFilterParameters().filter_data(
         t_data,
         data,

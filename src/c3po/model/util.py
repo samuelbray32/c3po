@@ -27,15 +27,19 @@ def prep_training_data(
     sample_length: int = 2000,
     overlap_fraction: float = 0.5,
     valid_indices=None,
-):
+) -> tuple:
     """Prepares training data for the model.
 
     Args:
-        x (np.ndarray): Sequence of marks. Shape (n_samples).
-        delta_t (np.ndarray): Sequence of time intervals. Shape (n_samples).
+        x (np.ndarray): Sequence of marks. Shape (1, n_samples, input_dim).
+        delta_t (np.ndarray): Sequence of time intervals. Shape (1, n_samples).
         sample_length (int, optional): length of each training sample. Defaults to 2000.
         overlap_fraction (float, optional): overlap in time of pairs of training data. Defaults to 0.5.
-        valid_indices (_type_, optional): indices to include in traing. Defaults of None includes all times.
+        valid_indices (optional): Currently unused.
+
+    Returns:
+        tuple: (x_train, delta_t_train) of shapes (n_train, sample_length, input_dim)
+            and (n_train, sample_length), consecutive overlapping windows of the input.
     """
     i = sample_length
     x_train = []
@@ -52,7 +56,11 @@ def prep_training_data(
 
 class StabilizedDenseDynamics(nn.Module):
     """Dense layer with stabilized linear dynamics (max eigenvalue <=1).
-    Used in custom models."""
+    Used in custom models.
+
+    Learns a (features, features) kernel (no bias is applied) and returns x @ K, or
+    x - x @ K if `delta_matrix`, where K is the stabilized kernel.
+    """
 
     features: int
     kernel_init: nn.initializers.Initializer = (
@@ -68,10 +76,12 @@ class StabilizedDenseDynamics(nn.Module):
         )
         self.bias = self.param("bias", self.bias_init, (self.features,))
 
-    def stable_matrix(self):
+    def stable_matrix(self) -> jnp.ndarray:
+        """Return the stabilized kernel."""
         return stabilize_matrix(self.kernel, self.delta_matrix)
 
     def __call__(self, x, stabilized_kernel=None):
+        """Apply the dynamics to `x` of shape (..., features); precomputed `stabilized_kernel` may be passed."""
         # stabilized_kernel = None
         if stabilized_kernel is None:
             stabilized_kernel = stabilize_matrix(self.kernel, self.delta_matrix)
@@ -82,7 +92,7 @@ class StabilizedDenseDynamics(nn.Module):
         return new_x  # , stabilized_kernel
 
 
-def stabilize_matrix(matrix, delta_matrix=False):
+def stabilize_matrix(matrix: jnp.ndarray, delta_matrix: bool = False) -> jnp.ndarray:
     """Stabilizes a matrix by scaling it to have the largest eigenvalue <= 1.
 
     Args:
@@ -90,6 +100,9 @@ def stabilize_matrix(matrix, delta_matrix=False):
         delta_matrix (bool, optional): Whether the matrix is a delta matrix. Defaults to False.
         ex) delta_matrix = True X_t = X_{t-1} - (M)X_t
             delta_matrix = False X_t = (M)X_t
+
+    Returns:
+        jax.numpy.ndarray: The stabilized matrix, same shape as `matrix`.
     """
     # return matrix
     if delta_matrix:
@@ -105,17 +118,20 @@ def stabilize_matrix(matrix, delta_matrix=False):
     return stabilized_matrix
 
 
-def estimate_largest_eigenvalue(matrix, num_iterations=100, tol=1e-6):
+def estimate_largest_eigenvalue(
+    matrix: jnp.ndarray, num_iterations: int = 100, tol: float = 1e-6
+) -> jnp.ndarray:
     """
     Estimates the largest eigenvalue of a matrix using the power iteration method.
 
     Args:
         matrix (jax.numpy.ndarray): Square matrix whose largest eigenvalue is to be estimated.
         num_iterations (int): Maximum number of iterations for power iteration.
-        tol (float): Convergence tolerance for eigenvalue difference.
+        tol (float): Convergence tolerance for eigenvalue difference. Currently unused;
+            all `num_iterations` are run.
 
     Returns:
-        float: Estimated largest eigenvalue.
+        jnp.ndarray: Estimated largest eigenvalue (scalar).
     """
     n = matrix.shape[0]
     # Randomly initialize the eigenvector
@@ -181,7 +197,11 @@ class CausalConv1D(nn.Module):
 
 
 class DilatedCausalConv1D(CausalConv1D):
-    """Causal Convolution with Dilated Filters."""
+    """Causal Convolution with Dilated Filters.
+
+    Input is left-padded (with the mean of the input) so the output has the same
+    length as the input along the time axis.
+    """
 
     dilation: int = 1  # Dilation factor
 
@@ -196,6 +216,7 @@ class DilatedCausalConv1D(CausalConv1D):
         )
 
     def __call__(self, x):
+        """Apply dilated causal convolution to x of shape (batch, time, channels)."""
         pad_width = int((self.kernel_size - 1) * self.dilation)
         x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="mean")
         return self.conv(x_padded)
@@ -237,7 +258,26 @@ class DilatedCausalConv1D(CausalConv1D):
 from functools import partial
 
 
-def causal_smoothing(x, filter_size=10, decay=None):
+def causal_smoothing(
+    x: jnp.ndarray, filter_size: int = 10, decay: float = None
+) -> jnp.ndarray:
+    """Causally smooth `x` over the time axis with a moving average.
+
+    Parameters
+    ----------
+    x : jnp.ndarray
+        Shape (batch, time, channels).
+    filter_size : int
+        Window length. Early samples are zero-padded.
+    decay : float, optional
+        If given, use an exponentially decaying window (weight decay**i for the
+        i-th previous sample, normalized) instead of a uniform one.
+
+    Returns
+    -------
+    jnp.ndarray
+        Smoothed array, same shape as `x`.
+    """
     pad_width = filter_size - 1  # Causal padding amount
     # Pad input with zeros on the left
     x_padded = jnp.pad(x, ((0, 0), (pad_width, 0), (0, 0)), mode="constant")

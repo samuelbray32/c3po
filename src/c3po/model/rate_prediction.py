@@ -8,7 +8,28 @@ from jax.tree_util import Partial
 
 def rate_prediction_factory(
     rate_model: str, latent_dim: int, context_dim: int, n_params: int, **kwargs
-):
+) -> nn.Module:
+    """Construct a rate prediction model by name.
+
+    Parameters
+    ----------
+    rate_model : str
+        One of "bilinear", "bilinearGlobal", "denseBilinear", "dense",
+        "bilinearLinear", "sharedSpace".
+    latent_dim : int
+        Dimension of the latent space (Z).
+    context_dim : int
+        Dimension of the context space (C).
+    n_params : int
+        Number of parameters of the process distribution to predict.
+    **kwargs
+        Additional arguments for the chosen model class.
+
+    Returns
+    -------
+    nn.Module
+        Model called as `model(z, c)`, returning an array of shape (..., n_params).
+    """
 
     if rate_model == "bilinear":
         return BilinearRatePrediction(
@@ -63,6 +84,7 @@ class SharedSpaceRatePrediction(nn.Module):
 
     @nn.compact
     def __call__(self, z, c):
+        """Return sum(z * c, axis=-1) with shape (..., 1)."""
         if not self.context_dim == self.latent_dim:
             raise ValueError(
                 "SharedSpaceRatePrediction requires context_dim to be equal to latent_dim"
@@ -76,6 +98,8 @@ class SharedSpaceRatePrediction(nn.Module):
 
 
 class BilinearRatePrediction(nn.Module):
+    """Each parameter is a bilinear form z^T W c + b of the latent and context."""
+
     context_dim: int  # The dimension of the context vector
     latent_dim: int  # The dimension of the latent vector
     n_params: int  # The number of parameters in the distribution model
@@ -110,6 +134,10 @@ class BilinearRatePrediction(nn.Module):
 
 
 class BilinearGlobalRatePrediction(nn.Module):
+    """Bilinear prediction using the first context_dim - 1 context entries, plus a
+    learned scale on the last context entry (a global term shared across z):
+    z^T W c[:-1] + r * c[-1] + b."""
+
     context_dim: int  # The dimension of the context vector
     latent_dim: int  # The dimension of the latent vector
     n_params: int  # The number of parameters in the distribution model
@@ -157,6 +185,8 @@ class BilinearGlobalRatePrediction(nn.Module):
 
 
 class DenseBilinearRatePrediction(nn.Module):
+    """Not implemented (raises NotImplementedError); not converted to multiple parameters."""
+
     context_dim: int
     latent_dim: int
     widths: Sequence[int]
@@ -176,6 +206,8 @@ class DenseBilinearRatePrediction(nn.Module):
 
 
 class BilinearLinearRatePrediction(nn.Module):
+    """Each parameter is z^T W c + W_c^T c + b: a bilinear plus a context-only linear term."""
+
     context_dim: int
     latent_dim: int
     n_params: int
@@ -217,6 +249,8 @@ class BilinearLinearRatePrediction(nn.Module):
 
 
 class DenseRatePrediction(nn.Module):
+    """MLP (hidden sizes `widths`) applied to the concatenation of z and c."""
+
     widths: Sequence[int]
     n_params: int
 

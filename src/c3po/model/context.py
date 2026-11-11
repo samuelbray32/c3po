@@ -15,6 +15,29 @@ from .util import (
 
 
 def context_factory(context_model: str, context_dim: int, **kwargs):
+    """Construct a context model by name.
+
+    Parameters
+    ----------
+    context_model : str
+        Name of the model, e.g. "simpleRNN", "stableSimpleRNN", "fastSlowRNN",
+        "heirarchicalRNN", "lfads", "LSTM", "projectedLSTM", "GRU", "myGRU",
+        "nullRNN", "wavenet", "wavenet_v2", "causalTransformer",
+        "samsTransformer", "slidingWindow", "multi_model", "bidirectional_c3po".
+    context_dim : int
+        Dimension of the context space (C).
+    **kwargs
+        Arguments for the chosen model. `infer_init` (default False) is only used
+        by recurrent cell models and is dropped for sequence models.
+
+    Returns
+    -------
+    nn.Module
+        Either a recurrent cell (nn.RNNCellBase; called as `cell(carry, z)` and
+        scanned over time by `Embedding`) or a sequence model called as
+        `model(z)` with z of shape (n_batch, n_marks, latent_dim + 1), returning
+        contexts of shape (n_batch, n_marks, context_dim).
+    """
     kwargs["infer_init"] = kwargs.get("infer_init", False)
     if context_model == "simpleRNN":
         return SimpleRNNContext(context_dim=context_dim, **kwargs)
@@ -63,6 +86,20 @@ def context_factory(context_model: str, context_dim: int, **kwargs):
 
 
 class BaseContext(nn.RNNCellBase):
+    """Base class for recurrent context cells.
+
+    Cells are called as `cell(carry, z)` and return `(new_carry, c)`. The input
+    `z` is the latent concatenated with log(delta_t) (see `Embedding`).
+
+    Parameters
+    ----------
+    context_dim : int
+        Dimension of the context (C).
+    infer_init : bool
+        If True, the initial carry is inferred from the data by `DefaultInferCarry`
+        instead of `initialize_carry`.
+    """
+
     context_dim: int
     infer_init: bool
 
@@ -71,21 +108,32 @@ class BaseContext(nn.RNNCellBase):
             self.infer_carry = DefaultInferCarry(self.context_dim)
 
     def __call__(self, c, z):
+        """Update the carry `c` with input `z`; returns (new_carry, context)."""
         raise NotImplementedError
 
     def initialize_carry(self, init_key, input_shape):
+        """Initial carry for inputs of shape `input_shape` (n_batch, input_dim)."""
         raise NotImplementedError
 
     def initialize_carry_from_data(self, z):
+        """Infer the initial carry from the full sequence `z` (n_batch, n_marks, dim)."""
         # raise NotImplementedError
         return self.infer_carry(z)
 
     @property
-    def num_feature_axes(self):
+    def num_feature_axes(self) -> int:
+        """Number of feature axes of the input (always 1)."""
         return 1
 
 
 class BidirectionalC3POContext(nn.Module):
+    """Runs a forward and a time-reversed backward context model over the sequence.
+
+    `forward_model_args` and `backward_model_args` are `context_factory` arguments
+    (including `context_model`). Returns a tuple (c_forward, c_backward), each of
+    shape (n_batch, n_marks, context_dim), both in the original time order.
+    """
+
     context_dim: int
     forward_model_args: dict
     backward_model_args: dict
@@ -106,6 +154,12 @@ class BidirectionalC3POContext(nn.Module):
 
 
 class MultiModelContext(nn.Module):
+    """Sum of the outputs of several sequence context models.
+
+    `model_args` is a sequence of `context_factory` arguments (including
+    `context_model`); output has shape (n_batch, n_marks, context_dim).
+    """
+
     context_dim: int
     model_args: Sequence[dict]
 
@@ -131,6 +185,9 @@ class MultiModelContext(nn.Module):
 
 
 class MultiModelContextv0(BaseContext):
+    """Recurrent version of `MultiModelContext`: the outputs of several context
+    models (cells or sequence models) are summed. The carry is a list with one entry per model."""
+
     context_dim: int
     model_args: Sequence[dict]
 
@@ -162,7 +219,7 @@ class MultiModelContextv0(BaseContext):
             new_c_i, out_i = model(c_i, z)
             new_carry.append(new_c_i)
             outputs.append(out_i)
-        # average the outputs
+        # sum the outputs
         output = sum(outputs)
         return new_carry, output
 
@@ -179,6 +236,9 @@ class MultiModelContextv0(BaseContext):
 
 
 class DefaultInferCarry(nn.Module):
+    """Infers an initial carry of size `context_dim` from a sequence by running
+    forward and backward GRUs and mapping their final states with an MLP."""
+
     context_dim: int
 
     def setup(self):
@@ -189,6 +249,7 @@ class DefaultInferCarry(nn.Module):
         self.dense = MLP([32, 32, self.context_dim])
 
     def __call__(self, z):
+        """Map z (n_batch, n_marks, dim) to an initial carry (n_batch, context_dim)."""
         z_forward = self.forward(z)[:, -1, :]
         z_backward = self.backward(z)[:, -1, :]
         features = jnp.concatenate([z_forward, z_backward], axis=-1)
@@ -196,6 +257,8 @@ class DefaultInferCarry(nn.Module):
 
 
 class NullRNN(BaseContext):
+    """Passes the input through unchanged as the context (no recurrence)."""
+
     def __call__(self, c, z):
         return 0, z
 
@@ -204,6 +267,8 @@ class NullRNN(BaseContext):
 
 
 class MyGRU(BaseContext):
+    """GRU with `gru_dim` units whose state is linearly projected to `context_dim`."""
+
     gru_dim: int
 
     def setup(self):
@@ -221,6 +286,9 @@ class MyGRU(BaseContext):
 
 
 class layeredGRU(BaseContext):
+    """Stack of GRU layers with sizes `gru_dims`, final state projected to `context_dim`.
+    Incomplete: `initialize_carry` does not return a carry."""
+
     gru_dims: Sequence[int]
 
     def setup(self):
@@ -248,6 +316,17 @@ class layeredGRU(BaseContext):
 
 
 class SimpleRNNContext(BaseContext):
+    """Simple RNN: c_new = tanh(MLP(z)) + W c.
+
+    Parameters
+    ----------
+    widths : Sequence[int]
+        Hidden sizes of the MLP applied to the input (output size `context_dim`).
+    scales : Sequence[float], optional
+        Initial diagonal of the history matrix W (per-dimension timescales).
+        Defaults to [0.9, 0.9, 0.5].
+    """
+
     widths: Sequence[int]
     scales: Sequence[float] = None
 
@@ -271,6 +350,10 @@ class SimpleRNNContext(BaseContext):
 
 
 def timescale_initializer(key, shape, dtype=jnp.float32, scales=[0.9, 0.9, 0.5]):
+    """Kernel initializer: small random normal entries with `scales` on the diagonal.
+
+    Uses numpy's global random state (the `key` and `dtype` arguments are unused).
+    """
     if scales is None:
         scales = [0.9, 0.9, 0.5]
     # qq = np.random.normal(0, 0.1, shape)
@@ -281,6 +364,9 @@ def timescale_initializer(key, shape, dtype=jnp.float32, scales=[0.9, 0.9, 0.5])
 
 
 class LFADSContext(BaseContext):
+    """Continuous-time update c_new = c + tanh(MLP(c)) * delta_t. The second
+    argument of `__call__` is the time step, not a latent. Has no `initialize_carry`."""
+
     widths: Sequence[int]
 
     def setup(self):
@@ -293,6 +379,12 @@ class LFADSContext(BaseContext):
 
 
 class StableSimpleRNNContext(BaseContext):
+    """Simple RNN with delta dynamics: c_new = tanh(MLP(z)) + c - W c.
+
+    `widths` are the MLP hidden sizes; `scales` is the initial diagonal of W
+    (default [0.1, 0.1, 0.1]).
+    """
+
     widths: Sequence[int]
     scales: Sequence[float] = None
 
@@ -316,6 +408,10 @@ class StableSimpleRNNContext(BaseContext):
 
 
 def stable_timescale_initializer(key, shape, dtype=jnp.float32, scales=[0.1, 0.1, 0.1]):
+    """Kernel initializer: random normal entries with `scales` on the diagonal.
+
+    Uses numpy's global random state (the `key` and `dtype` arguments are unused).
+    """
     # if scales is None:
     #     scales = [0.9, 0.9, 0.5]
     # qq = np.random.normal(0, 0.1, shape)
@@ -328,6 +424,31 @@ def stable_timescale_initializer(key, shape, dtype=jnp.float32, scales=[0.1, 0.1
 
 
 class FastSlowRNNContext(BaseContext):
+    """RNN with fast and slow latent states.
+
+    The first `latents - n_slow` states are updated at every step from the input;
+    the last `n_slow` states are updated from the fast states only every
+    `slow_update_freq` steps. The carry is (state, step[, stable matrices]).
+
+    Parameters
+    ----------
+    widths : Sequence[int]
+        Unused; the input network is a single Dense layer.
+    scales : Sequence[float]
+        Initial diagonal of the history matrices, one per latent (fast then slow).
+    latents : int, optional
+        Total number of latent states. Defaults to `context_dim`; if different,
+        the state is linearly projected to `context_dim`.
+    slow_update_freq : int
+        Steps between updates of the slow states.
+    n_slow : int
+        Number of slow states.
+    stabilize_dynamics : bool
+        Constrain the history matrices to have largest eigenvalue <= 1.
+    carry_stabilized : bool
+        Carry the stabilized matrices through the scan.
+    """
+
     widths: Sequence[int]
     scales: Sequence[float] = None
     latents: int = None
@@ -467,6 +588,10 @@ class FastSlowRNNContext(BaseContext):
 
 
 class ProjectedLSTM(BaseContext):
+    """Stack of LSTM layers of sizes `expanded_dim`, where layer i only updates
+    every `update_freq[i]` steps. The layer states are concatenated and linearly
+    projected to `context_dim`."""
+
     expanded_dim: Sequence[int]
     update_freq: Sequence[int]
 
@@ -521,6 +646,15 @@ class ProjectedLSTM(BaseContext):
 
 
 class HeirarchicalRNN(BaseContext):
+    """Hierarchy of linear-dynamics RNN layers of sizes `expanded_dim`.
+
+    The first layer is driven by the input; each later layer is driven by the
+    previous layer and updates only every `update_freq[i]` steps. Layer dynamics
+    are initialized with timescales around `scales[i]`. The concatenated states
+    are linearly projected to `context_dim`. If `infer_init`, initial states are
+    inferred from the data; otherwise they are learned parameters.
+    """
+
     scales: Sequence[float]
     expanded_dim: Sequence[int]
     update_freq: Sequence[int]
@@ -640,6 +774,7 @@ class SlidingWindow(nn.Module):
     )
 
     def __call__(self, x):
+        """Smooth x (n_batch, n_marks, dim + 1); the last (log delta_t) channel is dropped."""
         return causal_smoothing(
             x[..., :-1], self.window_size, decay=self.smoothing_decay
         )
@@ -704,6 +839,7 @@ class Wavenet(nn.Module):
         self.final_proj = CausalConv1D(self.context_dim, kernel_size=1, use_bias=False)
 
     def __call__(self, x):
+        """Compute contexts for x (n_batch, n_marks, input_dim); returns (n_batch, n_marks, context_dim)."""
         if self.smoothing > 1:
             x = causal_smoothing(x, self.smoothing, decay=self.smoothing_decay)
         x = self.initial_layer(x)  # expand from latent to context dimension
@@ -751,17 +887,22 @@ CAUSAL TRANSFORMER
 
 
 def _split_heads(x: jnp.ndarray, num_heads: int) -> jnp.ndarray:
+    """Reshape [B, T, D] to [B, num_heads, T, D // num_heads]."""
     B, T, D = x.shape
     d_k = D // num_heads
     return x.reshape(B, T, num_heads, d_k).transpose(0, 2, 1, 3)  # [B,H,T,d_k]
 
 
 def _merge_heads(x: jnp.ndarray) -> jnp.ndarray:
+    """Reshape [B, H, T, d_k] to [B, T, H * d_k]; inverse of `_split_heads`."""
     B, H, T, d_k = x.shape
     return x.transpose(0, 2, 1, 3).reshape(B, T, H * d_k)  # [B,T,D]
 
 
 class FlashSelfAttention(nn.Module):
+    """Causal self-attention using the fused `jax.nn.dot_product_attention` kernel (cuDNN).
+    Heads are not split (single head over `d_model`); `num_heads` and `dropout` are currently unused."""
+
     d_model: int
     num_heads: int
     dropout: float = 0.0
@@ -802,6 +943,9 @@ class FlashSelfAttention(nn.Module):
 
 
 class FlashTransformerBlock(nn.Module):
+    """Pre-LayerNorm transformer block: causal flash attention then a GELU MLP, each with a residual.
+    `mask` is accepted but unused (attention is causal)."""
+
     d_model: int
     num_heads: int
     mlp_dim: int
@@ -830,6 +974,8 @@ class FlashTransformerBlock(nn.Module):
 
 
 class _TransformerBlock(nn.Module):
+    """Pre-LayerNorm transformer block using `nn.SelfAttention` with the given `mask`."""
+
     d_model: int
     num_heads: int
     mlp_dim: int
@@ -918,6 +1064,8 @@ class CausalTransformer(nn.Module):
 
 
 class SamsTransformerBlock(nn.Module):
+    """Pre-LayerNorm transformer block with causal flash attention (bfloat16) and an ELU MLP."""
+
     qkv_dim: int
     num_heads: int
     mlp_dim: int
@@ -927,6 +1075,7 @@ class SamsTransformerBlock(nn.Module):
 
     @staticmethod
     def flash_attention(q, k, v, **kwargs):
+        """Causal attention in bfloat16 via `jax.nn.dot_product_attention`; returns float32."""
         q = q.astype(jnp.bfloat16)
         k = k.astype(jnp.bfloat16)
         v = v.astype(jnp.bfloat16)
@@ -944,8 +1093,8 @@ class SamsTransformerBlock(nn.Module):
         """Applies Encoder1DBlock module.
 
         Args:
-        inputs: input data.
-        deterministic: if true dropout is applied otherwise not.
+        inputs: input data of shape (batch, time, features).
+        deterministic: if true dropout is not applied, otherwise it is.
 
         Returns:
         output after transformer encoder block.
@@ -1027,8 +1176,9 @@ class SamsCausalTransformer(nn.Module):
             4096,
         ]
 
-    def _make_positional_embedding(self, delta_t) -> jnp.ndarray:
-
+    def _make_positional_embedding(self, delta_t: jnp.ndarray) -> jnp.ndarray:
+        """Sinusoidal embedding of elapsed time (cumulative sum of `delta_t`, shape
+        (batch, time)); returns (batch, time, 2 * n_periods)."""
         t = jnp.cumsum(delta_t, axis=1)
         t = jnp.expand_dims(t, axis=-1)
         sin_embedding = [

@@ -1,10 +1,15 @@
 import numpy as np
 
-def _is_sorted(arr):
+
+def _is_sorted(arr: np.ndarray) -> bool:
+    """Return True if `arr` is sorted in non-decreasing order."""
     return np.all(arr[:-1] <= arr[1:])
 
 
-def _interval_list_contains_ind_sorted(interval_list, timestamps):
+def _interval_list_contains_ind_sorted(
+    interval_list: np.ndarray, timestamps: np.ndarray
+) -> np.ndarray:
+    """Indices of sorted `timestamps` within `interval_list` (uses binary search)."""
     ind = []
     for interval in interval_list:
         st = np.searchsorted(timestamps, interval[0], side="left")
@@ -14,7 +19,9 @@ def _interval_list_contains_ind_sorted(interval_list, timestamps):
     return np.asarray(ind)
 
 
-def interval_list_contains_ind(interval_list, timestamps):
+def interval_list_contains_ind(
+    interval_list: np.ndarray, timestamps: np.ndarray
+) -> np.ndarray:
     """Find indices of list of timestamps contained in an interval list.
 
     Parameters
@@ -22,6 +29,13 @@ def interval_list_contains_ind(interval_list, timestamps):
     interval_list : array_like
         Each element is (start time, stop time), i.e. an interval in seconds.
     timestamps : array_like
+        Timestamps in seconds.
+
+    Returns
+    -------
+    ind : np.ndarray
+        Sorted, unique indices of `timestamps` that fall within any interval
+        (bounds inclusive).
     """
     ind = []
     if _is_sorted(timestamps):
@@ -36,14 +50,22 @@ def interval_list_contains_ind(interval_list, timestamps):
     return np.asarray(ind)
 
 
-def interval_list_contains(interval_list, timestamps):
+def interval_list_contains(
+    interval_list: np.ndarray, timestamps: np.ndarray
+) -> np.ndarray:
     """Find timestamps that are contained in an interval list.
 
     Parameters
     ----------
     interval_list : array_like
         Each element is (start time, stop time), i.e. an interval in seconds.
-    timestamps : array_like
+    timestamps : np.ndarray
+        Timestamps in seconds.
+
+    Returns
+    -------
+    np.ndarray
+        The timestamps within any interval (empty array if none).
     """
     ind = interval_list_contains_ind(interval_list, timestamps)
     if len(ind) == 0:
@@ -51,7 +73,9 @@ def interval_list_contains(interval_list, timestamps):
     return timestamps[ind]
 
 
-def interval_list_intersect(interval_list_1, interval_list_2):
+def interval_list_intersect(
+    interval_list_1: np.ndarray, interval_list_2: np.ndarray
+) -> np.ndarray:
     """Find the intersection of two interval lists.
 
     Parameters
@@ -60,6 +84,12 @@ def interval_list_intersect(interval_list_1, interval_list_2):
         Each element is (start time, stop time), i.e. an interval in seconds.
     interval_list_2 : array_like
         Each element is (start time, stop time), i.e. an interval in seconds.
+
+    Returns
+    -------
+    np.ndarray
+        Intersection intervals, shape (n_intervals, 2). Empty intersections
+        are dropped.
     """
     intersected_intervals = []
     for interval_1 in interval_list_1:
@@ -78,7 +108,9 @@ def interval_list_intersect(interval_list_1, interval_list_2):
     return intersect
 
 
-def interval_list_complement(intervals1, intervals2):
+def interval_list_complement(
+    intervals1: np.ndarray, intervals2: np.ndarray
+) -> np.ndarray:
     """
     Finds intervals in `intervals1` that are not covered by any interval in `intervals2`.
 
@@ -88,6 +120,11 @@ def interval_list_complement(intervals1, intervals2):
         Each element is (start time, stop time), i.e. an interval in seconds.
     intervals2 : array_like
         Each element is (start time, stop time), i.e. an interval in seconds.
+
+    Returns
+    -------
+    np.ndarray
+        Remaining intervals, shape (n_intervals, 2).
     """
     result = []
     for start1, end1 in intervals1:

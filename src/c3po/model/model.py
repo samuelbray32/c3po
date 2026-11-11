@@ -19,6 +19,22 @@ from .util import DilatedCausalConv1D, chunked_logsumexp
 
 
 class Embedding(nn.Module):
+    """Encoder plus context model mapping marks to latents (Z) and contexts (C).
+
+    Parameters
+    ----------
+    encoder_args : dict
+        Arguments for `encoder_factory`.
+    context_args : dict
+        Arguments for `context_factory`.
+    latent_dim : int
+        Dimension of the latent space (Z).
+    context_dim : int
+        Dimension of the context space (C).
+    convolutional : Sequence[dict], optional
+        Arguments for `DilatedCausalConv1D` layers applied to the context.
+    """
+
     encoder_args: dict
     context_args: dict
     latent_dim: int
@@ -47,6 +63,24 @@ class Embedding(nn.Module):
             self.convolutional_layers = []
 
     def __call__(self, x, delta_t, rand_key=None):
+        """Embed marks and compute the context.
+
+        Parameters
+        ----------
+        x : jnp.ndarray
+            Marks, shape (n_batch, n_marks, input_dim).
+        delta_t : jnp.ndarray
+            Positive time since previous mark, shape (n_batch, n_marks).
+        rand_key : jax.Array, optional
+            Random key; required if the encoder requires one.
+
+        Returns
+        -------
+        z : jnp.ndarray
+            Shape (n_batch, n_marks, latent_dim).
+        c : jnp.ndarray
+            Shape (n_batch, n_marks, context_dim).
+        """
         # attach delta_t to z to be used in context model
         if self.encoder.requires_random_key:
             if rand_key is None:
@@ -84,11 +118,46 @@ class Embedding(nn.Module):
         )  # z = (n_batch, n_marks, latent_dim), c = (n_batch, n_marks, context_dim)
 
     @property
-    def requires_random_key(self):
+    def requires_random_key(self) -> bool:
+        """Whether the encoder requires a random key to be passed."""
         return self.encoder.requires_random_key
 
 
 class C3PO(nn.Module):
+    """
+    C3PO model for continuous time point processes.
+
+    Marks are encoded to latent vectors (Z), a context model summarizes the
+    past into a context (C), and a rate model predicts the parameters of the
+    hazard of the following `predicted_sequence_length` marks. The model is
+    trained contrastively against negative samples drawn from other marks.
+
+    Parameters
+    ----------
+    encoder_args : dict
+        Arguments for the encoder model
+    context_args : dict
+        Arguments for the context model
+    rate_args : dict
+        Arguments for the rate prediction model
+    distribution : str
+        The distribution of the spiking process (key of `distribution_dictionary`)
+    latent_dim : int
+        The dimension of the latent space (Z)
+    context_dim : int
+        The dimension of the context space (C)
+    n_neg_samples : int
+        The number of negative samples to draw
+    predicted_sequence_length : int, optional
+        The length of the predicted sequence. The default is 1.
+    context_convolutional : Sequence[dict], optional
+        The convolutional layers post model. The default is None. Not stably implemented.
+    sample_params : str, optional
+        The method to sample the parameters. The default is None. Valid options are None, "gaussian".
+    return_embeddings_in_call : bool, optional
+        If True, `__call__` additionally returns z, c, and the negative samples.
+        The default is False.
+    """
     encoder_args: dict
     context_args: dict
     rate_args: dict
@@ -100,31 +169,6 @@ class C3PO(nn.Module):
     context_convolutional: Sequence[dict] = None
     sample_params: str = None
     return_embeddings_in_call: bool = False
-    """
-    C3PO model for continuous time point processes.
-    Parameters:
-    encoder_args: dict
-        Arguments for the encoder model
-    context_args: dict
-        Arguments for the context model
-    rate_args: dict
-        Arguments for the rate prediction model
-    distribution: str
-        The distribution of the spiking process
-    latent_dim: int
-        The dimension of the latent space (Z)
-    context_dim: int
-        The dimension of the context space (C)
-    n_neg_samples: int
-        The number of negative samples to draw
-    predicted_sequence_length: int, optional
-        The length of the predicted sequence. The default is 1.
-    context_convolutional: Sequence[dict], optional
-        The convolutional layers post model. The default is None. Not stably implemented.
-    sample_params: str, optional
-        The method to sample the parameters. The default is None. Valid options are None, "gaussian".
-
-    """
 
     def setup(self):
         self.embedding = Embedding(
@@ -146,9 +190,31 @@ class C3PO(nn.Module):
         )
 
     def _distribution_object(self):
+        """Instantiate the process distribution named by `self.distribution`."""
         return distribution_dictionary[self.distribution]()
 
     def __call__(self, x, delta_t, rand_key):
+        """Predict hazard parameters for observed and negative-sample sequences.
+
+        Parameters
+        ----------
+        x : jnp.ndarray
+            Marks, shape (n_batch, n_marks, input_dim).
+        delta_t : jnp.ndarray
+            Time since previous mark, shape (n_batch, n_marks).
+        rand_key : jax.Array
+            Random key for negative sampling (and the encoder if needed).
+
+        Returns
+        -------
+        pos_params : jnp.ndarray
+            Shape (n_batch, predicted_sequence_length, n_marks-predicted_sequence_length, n_params).
+        neg_params : jnp.ndarray
+            Shape (n_batch, n_neg_samples, n_marks-predicted_sequence_length, n_params).
+        z, c, neg_z : jnp.ndarray
+            Only if `return_embeddings_in_call`: latents, contexts and negative
+            sample latents.
+        """
         # Embed the marks and get the context
         if self.embedding.requires_random_key:
             z, c = self.embedding(x, delta_t, rand_key)
@@ -213,6 +279,7 @@ class C3PO(nn.Module):
         return pos_params, neg_params
 
     def embed(self, x, delta_t):
+        """Return (z, c) for marks `x` and time intervals `delta_t`; see `Embedding.__call__`."""
         return self.embedding(x, delta_t)
 
     def mle_loss(
@@ -227,17 +294,23 @@ class C3PO(nn.Module):
     ):
         """Maximum likelihood loss function for length n_predict and generic process.
         L = log(Hazard_pos) + log SUM_samples(Survival)
+        (the negative of the log-likelihood is returned).
 
         Parameters:
         pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
         neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
         delta_t: jnp.array of shape (batch_size, n_timepoints)
         sample_step: int, optional
-            The step to sample the loss. The default is 1.
+            The step to sample the loss. The default is 1. If None,
+            `predicted_sequence_length` is used.
             Useful to prevent issues with long predicted sequences.
-        scale_neg_samples: int, optional
-            The scaling factor for the negative samples. The default is 10.
+        n_emission_sources: int, optional
+            Scaling factor applied to the negative-sample survival term. The default is 20.
             This simulates increased number of negative samples without the memory cost.
+        rand_key: jnp.array, optional
+            The random key to use for sampling parameters when `sample_params` is "gaussian".
+        prior_params: dict, optional
+            Prior {"mu", "sigma"} for the KL penalty; required when `sample_params` is "gaussian".
 
         Returns:
             jnp.array: the loss value
@@ -317,13 +390,15 @@ class C3PO(nn.Module):
         return jnp.mean(neg_log_p)
 
     def loss(self, pos_parameters, neg_parameters, delta_t, z, neg_z):
-        """C3PO loss function for length n_predict and generic process.
+        """C3PO loss function; alias of `contrastive_loss`.
         Parameters:
         pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
         neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
         delta_t: jnp.array of shape (batch_size, n_timepoints)
-        rand_key: jnp.array, optional
-            The random key to use for sampling. The default is None.
+        z: jnp.array of shape (batch_size, n_timepoints, latent_dim)
+            Latents of the observed marks
+        neg_z: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, latent_dim)
+            Latents of the negative samples
 
         Returns:
             jnp.array: the loss value
@@ -354,12 +429,10 @@ class C3PO(nn.Module):
         pos_parameters: jnp.array of shape (batch_size, predicted_sequence_length, n_timepoints, n_params)
         neg_parameters: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, n_params)
         delta_t: jnp.array of shape (batch_size, n_timepoints)
-        sample_step: int, optional
-            The step to sample the loss. The default is 1.
-            Useful to prevent issues with long predicted sequences.
-        scale_neg_samples: int, optional
-            The scaling factor for the negative samples. The default is 10.
-            This simulates increased number of negative samples without the memory cost.
+        z: jnp.array of shape (batch_size, n_timepoints, latent_dim)
+            Latents of the observed marks, used for the noise hazard
+        neg_z: jnp.array of shape (batch_size, n_neg_samples, n_timepoints, latent_dim)
+            Latents of the negative samples, used for the noise hazard
 
         Returns:
             jnp.array: the loss value
@@ -408,6 +481,22 @@ class C3PO(nn.Module):
 
     @staticmethod
     def gauss_sample(key, params):
+        """Reparameterized Gaussian sample of the rate parameters.
+
+        Parameters
+        ----------
+        key : jax.Array
+            Random key.
+        params : jnp.ndarray
+            Shape (..., 2 * n_params): means followed by pre-softplus standard deviations.
+
+        Returns
+        -------
+        sample : jnp.ndarray
+            Sampled parameters, shape (..., n_params).
+        log_sample_prob : jnp.ndarray
+            Log density of the standard-normal draw, shape (..., n_params).
+        """
         n_params = params.shape[-1] // 2
         mu = params[..., :n_params]
         sigma = jnp.log1p(jnp.exp(params[..., n_params:]))
@@ -420,29 +509,38 @@ def get_neg_samples_batch(z, n_neg_samples, rand_key):
     """Get negative samples for full batch.
 
     Args:
-        z jnp.array: the embedded marks (n_marks, latent_dim)
+        z jnp.array: the embedded marks (n_batch, n_marks, latent_dim)
         n_neg_samples int: the number of negative samples to draw
         rand_key jnp.array: the random key
 
     Returns:
-        _type_: _description_
+        jnp.array: negative samples of shape (n_batch, n_neg_samples, n_marks, latent_dim)
     """
     neg_sampler = jax.jit(partial(get_neg_samples, z, n_neg_samples))
     return jax.vmap(neg_sampler)(jax.random.split(rand_key, z.shape[0]))
 
 
 def get_neg_samples(z, n_neg_samples, rand_key):
+    """Draw `n_neg_samples` negative samples from `z`; returns (n_neg_samples, n_marks, latent_dim)."""
     neg_sampler = jax.jit(partial(neg_sample, z))
     return jax.vmap(neg_sampler)(jax.random.split(rand_key, n_neg_samples))
 
 
 def neg_sample(z, rand_key):
+    """Draw one negative sample: marks chosen at random batch and time positions from `z`.
+
+    z has shape (n_batch, n_marks, latent_dim); returns (n_marks, latent_dim).
+    """
     batch_samples = jax.random.choice(rand_key, z.shape[0], shape=(z.shape[1],))
     time_samples = jax.random.choice(rand_key, z.shape[1], shape=(z.shape[1],))
     return z[batch_samples, time_samples]
 
 
 def loss_sample(pos_rates, cum_neg_rates, delta_t):
+    """Mean negative log-likelihood of exponential (constant rate) positive samples.
+
+    pos_rates, cum_neg_rates, delta_t : arrays of shape (n_marks,).
+    """
     neg_log_p = jnp.log(pos_rates**-1) + delta_t * (
         cum_neg_rates + pos_rates
     )  # (n_marks)
@@ -533,8 +631,8 @@ def train_model(
     Parameters:
         model (C3PO): The C3PO model to train.
         params (dict): The initial parameters of the model.
-        x_train (jnp.array): The training data marks.
-        delta_t_train (jnp.array): The training data time intervals.
+        x_train (jnp.array): The training data marks, shape (n_samples, n_marks, input_dim).
+        delta_t_train (jnp.array): The training data time intervals, shape (n_samples, n_marks). Must be positive.
         learning_rate (float): The learning rate for the optimizer.
         n_epochs (int): The maximum number of epochs to train.
         initial_batch_size (int): The initial batch size for training.
@@ -547,13 +645,14 @@ def train_model(
         multi_gpu (bool): Whether to use multiple GPUs for training.
         l1_penalty (float): L1 penalty on context embeddings. If None, no penalty is applied.
         return_intermediate_params (bool): Whether to return the parameters at each stall point.
-        return_training_hypers (bool): Whether to return the training hyperparameters used at each epoch.
+        return_training_hypers (bool): Whether to return the training hyperparameters used at each stall point.
 
     Returns:
         params (dict): The trained model parameters.
         tracked_loss (list): The tracked loss values over epochs.
-        intermediate_params (list, optional): The parameters at each epoch if return_intermediate_params is True.
-        training_hypers (list, optional): The training hyperparameters used at each epoch if return_training_hypers is True.
+        intermediate_params (list, optional): The parameters at each stall point if return_intermediate_params is True.
+        training_hypers (list, optional): The {"batch_size", "n_neg"} used at each stall point if return_training_hypers is True.
+            Return order is (params, tracked_loss[, intermediate_params][, training_hypers]).
     """
     # Check inputs
     if np.min(delta_t_train) <= 0:
@@ -724,12 +823,13 @@ def train_epoch(
         batch_size (int): The batch size for training.
         optimizer (optax.GradientTransformation): The optimizer to use.
         opt_state (optax.OptState): The optimizer state.
-        loss_grad_fn (Callable): The loss and gradient function.
+        loss_grad_fn (Callable): Function returning ((loss, context_max_range), grads),
+            i.e. a jitted `jax.value_and_grad(loss_fn, has_aux=True)`.
         epoch_number (int, optional): The epoch number for logging. Defaults to None.
         n_neg (int, optional): The number of negative samples for logging. Defaults to None.
 
     Raises:
-        ValueError: If the loss is not finite.
+        ValueError: If the loss is not finite or the context embedding collapsed.
     Returns:
         params (dict): The updated model parameters.
         opt_state (optax.OptState): The updated optimizer state.
@@ -930,15 +1030,15 @@ def train_epoch_multi_gpu(
     return merged_params, opt_state, average_epoch_loss
 
 
-def update_n_neg(model, new_n_neg):
-    """Updates the number of negative samples in the model.
+def update_n_neg(model: Module, new_n_neg: int) -> Module:
+    """Returns a copy of the model with the number of negative samples updated.
 
     Args:
         model (C3PO): The model to update.
         new_n_neg (int): The new number of negative samples.
 
     Returns:
-        C3PO: The updated model.
+        C3PO: A new model (BidirectionalC3PO if `model` is one) with the updated n_neg_samples.
     """
     from .bidirectional_model import BidirectionalC3PO  # avoid circular import
 

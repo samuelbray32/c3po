@@ -9,6 +9,13 @@ from .model import C3PO, get_neg_samples_batch
 
 
 class BidirectionalC3PO(C3PO):
+    """C3PO with a forward and a backward context model and a shared latent/context space.
+
+    The rate of the mark following time i is the dot product of the forward
+    context at i and the backward context at i + 1. Requires
+    `rate_args["rate_model"] == "sharedSpace"`, `context_args["context_model"] ==
+    "bidirectional_c3po"` and `distribution == "poisson"`. Arguments are those of `C3PO`.
+    """
 
     def setup(self):
         if not self.rate_args.get("rate_model", None) == "sharedSpace":
@@ -34,6 +41,27 @@ class BidirectionalC3PO(C3PO):
         super().setup()
 
     def __call__(self, x, delta_t, rand_key):
+        """Compute dot-product rate parameters for observed and negative samples.
+
+        Parameters
+        ----------
+        x : jnp.ndarray
+            Marks, shape (n_batch, n_marks, input_dim).
+        delta_t : jnp.ndarray
+            Time since previous mark, shape (n_batch, n_marks).
+        rand_key : jax.Array
+            Random key for negative sampling.
+
+        Returns
+        -------
+        pos_params : jnp.ndarray
+            Shape (n_batch, n_marks - 1, 1).
+        neg_params : jnp.ndarray
+            Shape (n_batch, n_neg_samples, n_marks - 1, 1).
+        z, c, neg_c_backward
+            Only if `return_embeddings_in_call`: latents, the (c_forward,
+            c_backward) tuple, and the negative backward contexts.
+        """
         # Embed the marks and get the context
         if self.embedding.requires_random_key:
             z, c = self.embedding(x, delta_t, rand_key)
@@ -75,9 +103,26 @@ class BidirectionalC3PO(C3PO):
         return pos_params, neg_params
 
     def loss(self, pos_parameters, neg_parameters, *args, **kwargs):
+        """Alias of `contrastive_loss`; extra arguments are ignored."""
         return self.contrastive_loss(pos_parameters, neg_parameters)
 
     def contrastive_loss(self, pos_parameters, neg_parameters, *args, **kwargs):
+        """Softmax contrastive loss over the positive and negative rate parameters.
+
+        L = -pos + logsumexp([neg_1, ..., neg_n, pos]), averaged. Extra arguments are ignored.
+
+        Parameters
+        ----------
+        pos_parameters : jnp.ndarray
+            Shape (n_batch, n_marks - 1, 1).
+        neg_parameters : jnp.ndarray
+            Shape (n_batch, n_neg_samples, n_marks - 1, 1).
+
+        Returns
+        -------
+        jnp.ndarray
+            Scalar loss.
+        """
         expanded_neg_params = jnp.concatenate(
             [
                 neg_parameters,
