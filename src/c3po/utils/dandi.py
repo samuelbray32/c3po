@@ -7,6 +7,7 @@ from fsspec.implementations.cached import CachingFileSystem
 import pynwb
 from pathlib import Path
 import h5py
+import os
 import pandas as pd
 import numpy as np
 import jax
@@ -31,7 +32,7 @@ DEFAULT_TRAIN_ARGS = dict(
 
 # Helpers
 def get_dandi_file(dandiset_id, dandi_path, dandi_instance="dandi"):
-    tmp_dir = "dandi_cache"  # Local folder for cache
+    tmp_dir = os.environ.get("C3PO_CACHE_DIR", "dandi_cache")  # Local folder for cache
     Path(tmp_dir).mkdir(exist_ok=True)  # Create the cache folder if it doesn't exist
 
     # get the s3 url from Dandi
@@ -56,6 +57,35 @@ def get_dandi_file(dandiset_id, dandi_path, dandi_instance="dandi"):
     io = pynwb.NWBHDF5IO(file=h5py.File(fs_file))
     nwbfile = io.read()
     return io, nwbfile
+
+def dandi_fetch_nwb_contents(entries:pd.DataFrame):
+    """Fetch NWB contents from Dandi for the given entries.
+
+    Args:
+        entries (pd.DataFrame): DataFrame containing Dandi entries with columns
+            'dandiset_id', 'dandi_path', and any '<object_type>_object_id' columns.
+
+    Returns:
+        list[dict]: List of dictionaries containing the fetched NWB objects.
+    """
+    results = []
+    for row in entries.itertuples():
+        io, nwbfile = get_dandi_file(
+            dandiset_id= row.dandiset_id,
+            dandi_path = row.dandi_path
+        )
+        object_dict = {}
+        for col in row._fields:
+            if col.endswith("_object_id"):
+                object_id = getattr(row, col)
+                data = nwbfile.objects[object_id]
+                import pynwb
+                if isinstance(data, pynwb.base.DynamicTable):
+                    data = data.to_dataframe()
+                object_dict[col.split("_object_id")[0]] = data
+
+        results.append(object_dict)
+    return results
 
 
 def get_spike_data(nwbfile):
@@ -130,7 +160,7 @@ def get_sorted_c3po_model(
     model = C3PO(**model_args)
     return model, model_args
 
-
+# Training
 def train_from_dandi(
     dandiset_id: str,
     dandi_path: str,
