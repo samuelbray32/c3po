@@ -1,3 +1,6 @@
+"""Utility layers and functions for custom flax models (MLPs, stabilized linear
+dynamics, causal convolutions) and training data preparation."""
+
 from typing import Sequence
 
 import flax.linen as nn
@@ -14,7 +17,8 @@ class MLP(nn.Module):
     kernel_init: nn.initializers.Initializer = nn.initializers.lecun_normal()
 
     @nn.compact
-    def __call__(self, x):
+    def __call__(self, x: jnp.ndarray) -> jnp.ndarray:
+        """Apply the MLP to `x` of shape (..., features[0] input dim)."""
         for feat in self.features[:-1]:
             x = nn.leaky_relu(nn.Dense(feat, kernel_init=self.kernel_init)(x))
         x = nn.Dense(self.features[-1], kernel_init=self.kernel_init)(x)

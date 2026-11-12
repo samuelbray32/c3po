@@ -1,3 +1,5 @@
+"""Utilities for fetching NWB data from DANDI and training sorted-units C3PO models."""
+
 from pathlib import Path
 from dandi.consts import known_instances
 from dandi.dandiapi import DandiAPIClient
@@ -31,7 +33,21 @@ DEFAULT_TRAIN_ARGS = dict(
 
 
 # Helpers
-def get_dandi_file(dandiset_id, dandi_path, dandi_instance="dandi"):
+def get_dandi_file(
+    dandiset_id: str, dandi_path: str, dandi_instance: str = "dandi"
+) -> tuple:
+    """Stream an NWB file asset from a Dandiset, caching it to local disk.
+
+    Args:
+        dandiset_id (str): Dandiset identifier (e.g. "000123").
+        dandi_path (str): Path to the asset within the dandiset.
+        dandi_instance (str, optional): Dandi instance to query (e.g. "dandi" or
+            "dandi-staging"). Defaults to "dandi".
+
+    Returns:
+        tuple: (io, nwbfile) where `io` is the open `pynwb.NWBHDF5IO` reader and
+            `nwbfile` is the read `pynwb.NWBFile` object.
+    """
     tmp_dir = os.environ.get("C3PO_CACHE_DIR", "dandi_cache")  # Local folder for cache
     Path(tmp_dir).mkdir(exist_ok=True)  # Create the cache folder if it doesn't exist
 
@@ -88,7 +104,17 @@ def dandi_fetch_nwb_contents(entries:pd.DataFrame):
     return results
 
 
-def get_spike_data(nwbfile):
+def get_spike_data(nwbfile) -> tuple[np.ndarray, np.ndarray]:
+    """Extract and time-sort spike events from all Units tables in an NWB file.
+
+    Args:
+        nwbfile: Loaded `pynwb.NWBFile` object containing one or more
+            `pynwb.misc.Units` objects.
+
+    Returns:
+        tuple[np.ndarray, np.ndarray]: (mark_times, mark_ids), time-sorted arrays
+            of spike times and the corresponding unit index for each spike.
+    """
     units = []
     for obj in nwbfile.objects.values():
         if isinstance(obj, pynwb.misc.Units):
@@ -116,7 +142,22 @@ def get_sorted_c3po_model(
     dimensions: int,
     mua_rate: float,
     model_args: dict | Path | str = "sorted_default_v0",
-):
+) -> tuple:
+    """Build a sorted-units C3PO model from a named/pre-built or on-disk config.
+
+    Args:
+        n_units (int): Number of sorted units (encoder input dimension).
+        dimensions (int): Latent/context dimensionality of the model.
+        mua_rate (float): Average multi-unit activity rate (Hz), used only for
+            reporting context-window timescales.
+        model_args (dict | Path | str, optional): Either a name of a built-in config
+            in `c3po.utils.model_configs.configs`, a path to a JSON config file, or
+            a dict of model arguments. Defaults to "sorted_default_v0".
+
+    Returns:
+        tuple: (model, model_args), the constructed `C3PO` model and the resolved
+            model argument dictionary (with unit/dimension-specific entries filled in).
+    """
     # Load the model_args from file if provided
     if isinstance(model_args, str) and model_args in configs:
         model_args = configs[model_args]
@@ -167,10 +208,29 @@ def train_from_dandi(
     dandi_instance: str,
     dimensions: int,
     output_dir: Path,
-    sample_length=2000,
+    sample_length: int = 2000,
     train_args: dict = dict(),
     model_args: dict | Path | str = "sorted_default_v0",
 ):
+    """Download an NWB asset from Dandi and train a sorted-units C3PO model on it.
+
+    Args:
+        dandiset_id (str): Dandiset identifier (e.g. "000123").
+        dandi_path (str): Path to the NWB asset within the dandiset.
+        dandi_instance (str): Dandi instance to query (e.g. "dandi" or "dandi-staging").
+        dimensions (int): Latent/context dimensionality of the model.
+        output_dir (Path): Directory to save the trained model and training outputs.
+        sample_length (int, optional): Number of spike events per training sample.
+            Defaults to 2000.
+        train_args (dict, optional): Overrides for `DEFAULT_TRAIN_ARGS` passed to
+            `train_model`. Defaults to an empty dict.
+        model_args (dict | Path | str, optional): Model configuration, see
+            `get_sorted_c3po_model`. Defaults to "sorted_default_v0".
+
+    Returns:
+        The result of `train_from_nwb` / `train_from_spike_data` (None; outputs are
+        saved to `output_dir`).
+    """
     io, nwbfile = get_dandi_file(dandiset_id, dandi_path, dandi_instance)
     return train_from_nwb(
         nwbfile,
@@ -186,11 +246,29 @@ def train_from_nwb(
     nwbfile: pynwb.NWBFile | str | Path,
     dimensions: int,
     output_dir: Path,
-    sample_length=2000,
+    sample_length: int = 2000,
     model_args: dict | Path | str = "sorted_default_v0",
     multi_gpu: bool = False,
-    train_args: dict = dict()
+    train_args: dict = dict(),
 ):
+    """Train a sorted-units C3PO model from an in-memory or on-disk NWB file.
+
+    Args:
+        nwbfile (pynwb.NWBFile | str | Path): Loaded NWB file object, or a path to
+            an NWB file to be read from disk.
+        dimensions (int): Latent/context dimensionality of the model.
+        output_dir (Path): Directory to save the trained model and training outputs.
+        sample_length (int, optional): Number of spike events per training sample.
+            Defaults to 2000.
+        model_args (dict | Path | str, optional): Model configuration, see
+            `get_sorted_c3po_model`. Defaults to "sorted_default_v0".
+        multi_gpu (bool, optional): Currently unused. Defaults to False.
+        train_args (dict, optional): Overrides for `DEFAULT_TRAIN_ARGS` passed to
+            `train_model`. Defaults to an empty dict.
+
+    Returns:
+        The result of `train_from_spike_data` (None; outputs are saved to `output_dir`).
+    """
     # If nwbfile is a path, read the NWB file
     if isinstance(nwbfile, [str, Path]):
         import pynwb
@@ -210,15 +288,40 @@ def train_from_nwb(
 
 
 def train_from_spike_data(
-    mark_times,
-    mark_ids,
-    dimensions,
-    output_dir,
-    sample_length=2000,
+    mark_times: np.ndarray,
+    mark_ids: np.ndarray,
+    dimensions: int,
+    output_dir: Path,
+    sample_length: int = 2000,
     model_args: dict | Path | str = "sorted_default_v0",
     train_args: dict = dict(),
-    time_scale_unit: str = "ms"
+    time_scale_unit: str = "ms",
 ):
+    """Train a sorted-units C3PO model directly from spike time/id arrays.
+
+    Builds training windows, initializes and trains the model, embeds the full
+    dataset, fits/interpolates context PCA, saves the resulting analysis object,
+    and writes a diagnostic plot and training metrics to `output_dir`.
+
+    Args:
+        mark_times (np.ndarray): Spike times, shape (n_spikes,).
+        mark_ids (np.ndarray): Unit index for each spike, shape (n_spikes,).
+        dimensions (int): Latent/context dimensionality of the model.
+        output_dir (Path): Directory to save the model, metrics, and plots.
+        sample_length (int, optional): Number of spike events per training sample.
+            Defaults to 2000.
+        model_args (dict | Path | str, optional): Model configuration, see
+            `get_sorted_c3po_model`. Defaults to "sorted_default_v0".
+        train_args (dict, optional): Overrides for `DEFAULT_TRAIN_ARGS` passed to
+            `train_model`. Defaults to an empty dict.
+        time_scale_unit (str, optional): Units of `mark_times`; one of "ms", "us",
+            or "s". Used to convert inter-spike intervals to milliseconds. Defaults
+            to "ms".
+
+    Returns:
+        None. Trained model/analysis outputs, a context PCA plot, and training
+        metrics are saved to `output_dir`.
+    """
     # Merge default train_args with user-provided train_args
     compiled_train_args = DEFAULT_TRAIN_ARGS.copy()
     compiled_train_args.update(train_args)
