@@ -12,7 +12,8 @@ import h5py
 import os
 import pandas as pd
 
-from c3po.utils.sorted import train_from_nwb, train_from_spike_data
+from c3po.utils.sorted import train_from_nwb
+from c3po.utils.sorted import train_from_sorted_data as train_from_spike_data # backwards compatibility
 
 # Helpers
 def get_dandi_file(
@@ -89,9 +90,9 @@ def dandi_fetch_nwb_contents(entries:pd.DataFrame):
 def train_from_dandi(
     dandiset_id: str,
     dandi_path: str,
-    dandi_instance: str,
-    dimensions: int,
-    output_dir: Path,
+    dandi_instance: str = "dandi",
+    dimensions: int = 16,
+    output_dir: Path = Path("."),
     sample_length: int = 2000,
     train_args: dict = dict(),
     model_args: dict | Path | str = "sorted_default_v0",

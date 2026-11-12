@@ -9,6 +9,7 @@ import pandas as pd
 
 from c3po.model.model import C3PO, train_model
 from c3po.model.util import prep_training_data
+from c3po.analysis.analysis import C3poAnalysis
 from c3po.utils.model_configs import configs
 from c3po.utils._defaults import DEFAULT_TRAIN_ARGS
 
@@ -136,7 +137,7 @@ def train_from_nwb(
             `train_model`. Defaults to an empty dict.
 
     Returns:
-        The result of `train_from_spike_data` (None; outputs are saved to `output_dir`).
+        The result of `train_from_sorted_data` (None; outputs are saved to `output_dir`).
     """
     # If nwbfile is a path, read the NWB file
     if isinstance(nwbfile, [str, Path]):
@@ -145,7 +146,7 @@ def train_from_nwb(
         io = pynwb.NWBHDF5IO(nwbfile, "r")
         nwbfile = io.read()
     mark_times, mark_ids = get_spike_data(nwbfile)
-    return train_from_spike_data(
+    return train_from_sorted_data(
         mark_times,
         mark_ids,
         dimensions,
@@ -156,7 +157,7 @@ def train_from_nwb(
     )
 
 
-def train_from_spike_data(
+def train_from_sorted_data(
     mark_times: np.ndarray,
     mark_ids: np.ndarray,
     dimensions: int,
