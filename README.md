@@ -6,9 +6,50 @@ features of unclustered spike events.
 
 Analysis associated with the publication "Learning predictive latent structure from
 unclustered neural spike trains" available at the
-[publication repository](https://github.com/samuelbray32/c3po_publication)
+[publication repository]\([https://github.com/samuelbray32/c3po_publication](https://github.com/samuelbray32/c3po_publication))
 
-## Usage
+## Local Installation
+
+```bash
+conda env create c3po
+conda activate c3po
+conda install pip
+pip install c3po-neuro
+```
+
+Optional dependencies:
+
+```bash
+c3po-neuro[gpu] #For gpu acceleration.
+c3po-neuro[cloud] #For loading of cloud models stored on higging face
+```
+
+## Just want to try it out?
+
+Try C3PO on a public DANDI recording in Google Colab with no local installation required. Enter the Dandiset ID and the path to an NWB file containing sorted spikes. The notebook sets up C3PO in the Colab runtime, trains a model on a GPU, and displays a PCA plot of the inferred context. You can download the trained model and analysis outputs as a ZIP archive or save them to Google Drive. [Open the C3PO demo in Google Colab]\([https://colab.research.google.com/github/samuelbray32/c3po/blob/main/tutorial/c3po_dandi_colab.ipynb](https://colab.research.google.com/github/samuelbray32/c3po/blob/main/tutorial/c3po_dandi_colab.ipynb)).
+
+# Quick Start
+
+## Sorted Data
+
+C3PO provides functions for constructing and training sorted spike models from several sources:
+
+- Data published on the DANDI archive:  `c3po.utils.train_from_dandi()`
+- Data stored within a local NWB file: `c3po.utils.train_from_nwb()`
+- A loaded array of spike times and neuron ids: `c3po.utils.train_from_spike_data()`
+
+By default, these will train with the architecture and parameters used in the publication data screening. Alternative model architectures can be passed as arguments. For a walk through of these options, see the [tutorial notebook](./tutorial/sorted_units.ipynb)
+
+## Clusterless Data
+
+C3PO can infer latent neural states directly from spike times and waveform features, without spike sorting. Each event is represented by its timestamp and a feature vector, such as peak amplitudes across recording channels.
+
+Clusterless models can be trained through two workflows:
+
+- **Waveform feature arrays:** Use `c3po.model.util.prep_training_data()` to construct training sequences from waveform features and inter-event intervals, then initialize a `C3PO` model and train it with `c3po.model.model.train_model()`. Choose the `"simple"` encoder for feature vectors or `"multi_shank_v1"` for separate encoders across tetrodes or probe shanks. See [model declaration](#model-declaration) below.
+- **Data managed in Spyglass:** Use the [Spyglass C3PO extension](https://github.com/samuelbray32/spyglass_c3po) to organize waveform features, configure and train models, and load inferred embeddings. The [pipeline tutorial](https://github.com/samuelbray32/spyglass_c3po/blob/main/tutorials/c3po_pipeline.ipynb) walks through this workflow.
+
+# Usage
 
 ### Model declaration
 
@@ -81,7 +122,7 @@ model = C3PO(
 documentation. For derivation and explanation of loss functions see
 [documentation](/docs/contrastive_loss.md)
 
-__NCE (Recommended)__: The noise contrastive estimation loss is given by:
+**NCE (Recommended)**: The noise contrastive estimation loss is given by:
 $\mathcal{L} = - \mathbb{E}_i[\log \frac{H_i/H'_i}{\sum_j H_j/H'_j}]$. Example execution
 of the `C3PO` method shown below:
 
@@ -111,7 +152,7 @@ loss =  model.contrastive_sequence_loss(
 )
 ```
 
-__MLE__: Maximum likelihood loss is given by
+**MLE**: Maximum likelihood loss is given by
 $\mathcal{L}=\mathbb{E}_i[-\log H_i+\log\bar{S}_i]$ and is provided as a method of the
 `C3PO` class. Example execution shown below:
 
