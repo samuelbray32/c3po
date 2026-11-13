@@ -140,7 +140,7 @@ def train_from_nwb(
         The result of `train_from_sorted_data` (None; outputs are saved to `output_dir`).
     """
     # If nwbfile is a path, read the NWB file
-    if isinstance(nwbfile, [str, Path]):
+    if isinstance(nwbfile, (str, Path)):
         import pynwb
 
         io = pynwb.NWBHDF5IO(nwbfile, "r")
