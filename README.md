@@ -28,7 +28,7 @@ c3po-neuro[cloud] #For loading of cloud models stored on higging face
 
 ### Try it out on the cloud
 
-Run C3PO on public DANDI recordings in Google Colab with no local installation required. Enter the Dandiset ID and the path to an NWB file containing sorted spikes. The notebook sets up C3PO in the Colab runtime, trains a model on a GPU, and displays a PCA plot of the inferred context. You can download the trained model and analysis outputs as a ZIP archive or save them to Google Drive. [Open the C3PO demo in Google Colab]([https://colab.research.google.com/github/samuelbray32/c3po/blob/main/tutorial/c3po_dandi_colab.ipynb](https://colab.research.google.com/github/samuelbray32/c3po/blob/main/tutorial/c3po_dandi_colab.ipynb)).
+Run C3PO on public DANDI recordings in Google Colab with no local installation required. Enter the Dandiset ID and the path to an NWB file containing sorted spikes. The notebook sets up C3PO in the Colab runtime, trains a model on a GPU, and displays a PCA plot of the inferred context. You can download the trained model and analysis outputs as a ZIP archive or save them to Google Drive. [Open the C3PO demo in Google Colab](https://colab.research.google.com/github/samuelbray32/c3po/blob/main/tutorial/c3po_dandi_colab.ipynb).
 
 ## Quick Start
 
