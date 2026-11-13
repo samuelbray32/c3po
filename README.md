@@ -6,9 +6,9 @@ features of unclustered spike events.
 
 Analysis associated with the publication "Learning predictive latent structure from
 unclustered neural spike trains" available at the
-[publication repository]\([https://github.com/samuelbray32/c3po_publication](https://github.com/samuelbray32/c3po_publication))
+[publication repository](https://github.com/samuelbray32/c3po_publication).
 
-## Instalation
+## Installation
 
 ### Local
 
